@@ -1,0 +1,43 @@
+# Hosted workspace override.
+# Copy this to workspace.override.toml and fill in your values.
+# Fields here are deep-merged over workspace.toml — only specify what changes.
+# Keep this file out of version control if it contains org names or internal details.
+# Add workspace.override.toml to .gitignore.
+
+[workspace]
+name = "ownpulse-hosted"
+default_org = "ownpulse-hosted"     # different GitHub org for hosted repos
+default_branch = "main"
+
+[env]
+OWNPULSE_ENV = "hosted-development"
+# Additional secrets required for hosted repos — values read from host env.
+# STRIPE_API_KEY = { source = "env" }
+# DATADOG_API_KEY = { source = "env" }
+
+# Additional private repos not in the OSS workspace.
+# These are appended to the base repo list.
+[[repo]]
+name = "ownpulse-billing"
+description = "Hosted billing and subscription management"
+org = "ownpulse-hosted"
+visibility = "private"
+branch = "main"
+agents = ["rust-backend", "security-review", "principles-guardian"]
+worktrees = ["billing"]
+
+[[repo]]
+name = "ownpulse-ops"
+description = "Hosted ops runbooks, on-call, internal dashboards"
+org = "ownpulse-hosted"
+visibility = "private"
+branch = "main"
+agents = ["k8s-infra", "security-review"]
+worktrees = []
+
+# Override an existing OSS repo — matched by name, fields are merged.
+# Example: point ownpulse-infra at the hosted org's fork.
+[[repo_override]]
+name = "ownpulse-infra"
+org = "ownpulse-hosted"
+branch = "hosted-main"
