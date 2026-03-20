@@ -17,6 +17,8 @@ import (
 	"github.com/ownpulse/ownpulse-dev/src/config"
 )
 
+const tmuxSessionName = "opdev"
+
 // SessionState is persisted to .ownpulse-dev/sessions.json in the clone root.
 type SessionState struct {
 	Sessions []Session `json:"sessions"`
@@ -31,16 +33,82 @@ type Session struct {
 	AgentMode string    `json:"agent_mode"` // "solo" or "teams"
 	Managed   bool      `json:"managed"`    // true = session created this worktree, should clean up
 	Branch    string    `json:"branch"`     // branch created for this session worktree
+	TmuxWindow string  `json:"tmux_window,omitempty"` // tmux window name
 	StartedAt time.Time `json:"started_at"`
 }
 
 // SessionOptions holds parameters for spawning a session.
 type SessionOptions struct {
-	RepoName   string
-	Worktree   string
-	Teams      bool
-	DryRun     bool
-	AgentsPath string // resolved absolute path to agent definitions
+	RepoName       string
+	Worktree       string
+	Teams          bool
+	DryRun         bool
+	AgentsPath     string // resolved absolute path to agent definitions
+	DangerousPerms bool   // pass --dangerously-skip-permissions to claude
+}
+
+// SpawnWorkspaceSession launches a Claude Code session in the workspace root (clone_root)
+// with all agents from all repos linked. Use this for cross-cutting features.
+func SpawnWorkspaceSession(cfg *config.WorkspaceConfig, opts SessionOptions) error {
+	sessionDir := cfg.Workspace.CloneRoot
+
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		return fmt.Errorf("creating workspace dir: %w", err)
+	}
+
+	// Collect all unique agents across all repos.
+	agentSet := make(map[string]bool)
+	for _, repo := range cfg.Repos {
+		for _, a := range repo.Agents {
+			agentSet[a] = true
+		}
+	}
+	var allAgents []string
+	for a := range agentSet {
+		allAgents = append(allAgents, a)
+	}
+
+	windowName := "workspace"
+	fmt.Printf("%s Launching workspace session with %d agents\n", info("→"), len(allAgents))
+	fmt.Printf("    directory: %s\n", sessionDir)
+
+	if !opts.DryRun {
+		if err := LinkAgents(sessionDir, allAgents, opts.AgentsPath, false); err != nil {
+			fmt.Printf("  %s could not link agents: %v\n", warn("!"), err)
+		}
+	} else {
+		for _, a := range allAgents {
+			fmt.Printf("    would link agent: %s\n", a)
+		}
+		fmt.Printf("    %s (dry run — would exec claude in %s)\n", warn("~"), sessionDir)
+		return nil
+	}
+
+	env := sessionEnv(cfg, opts)
+	claudeArgs := claudeArgs(opts)
+
+	pid, err := launchInTmux(windowName, sessionDir, env, claudeArgs)
+	if err != nil {
+		return err
+	}
+
+	session := Session{
+		Name:       windowName,
+		RepoName:   "",
+		PID:        pid,
+		Dir:        sessionDir,
+		AgentMode:  agentMode(opts.Teams),
+		Managed:    false,
+		TmuxWindow: windowName,
+		StartedAt:  time.Now(),
+	}
+
+	if err := saveSession(cfg.Workspace.CloneRoot, session); err != nil {
+		fmt.Printf("  %s could not save session state: %v\n", warn("!"), err)
+	}
+
+	fmt.Printf("  %s session started in tmux window '%s'\n", ok("✓"), windowName)
+	return nil
 }
 
 // SpawnSession creates an isolated git worktree and launches a Claude Code session in it.
@@ -79,12 +147,18 @@ func SpawnSession(cfg *config.WorkspaceConfig, opts SessionOptions) error {
 	// Determine the start point for the worktree.
 	startPoint := ""
 	if opts.Worktree != "" {
-		// Branch off the named worktree's branch.
 		wtBranch := fmt.Sprintf("worktree/%s", opts.Worktree)
 		if runSilent("git", "-C", repoDir, "show-ref", "--verify", "--quiet", "refs/heads/"+wtBranch) == nil {
 			startPoint = wtBranch
 		}
 	}
+
+	// Window name for tmux: short and readable.
+	windowName := repo.Name
+	if opts.Worktree != "" {
+		windowName = repo.Name + "-" + opts.Worktree
+	}
+	windowName = windowName + "-" + id[:4]
 
 	fmt.Printf("%s Creating session worktree: %s\n", info("→"), sessionName)
 	fmt.Printf("    directory: %s\n", sessionDir)
@@ -99,7 +173,6 @@ func SpawnSession(cfg *config.WorkspaceConfig, opts SessionOptions) error {
 			return fmt.Errorf("creating session worktree: %w", err)
 		}
 
-		// Link agents into the session worktree.
 		if err := LinkAgents(sessionDir, repo.Agents, opts.AgentsPath, false); err != nil {
 			fmt.Printf("  %s could not link agents: %v\n", warn("!"), err)
 		}
@@ -108,46 +181,98 @@ func SpawnSession(cfg *config.WorkspaceConfig, opts SessionOptions) error {
 		return nil
 	}
 
-	// Build environment.
-	env := os.Environ()
-	for k, v := range cfg.Env {
-		env = append(env, k+"="+v)
-	}
-	if opts.Teams {
-		env = append(env, "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1")
-		fmt.Printf("  %s Agent teams mode enabled\n", warn("!"))
-	}
+	env := sessionEnv(cfg, opts)
+	claudeArgs := claudeArgs(opts)
 
-	// Launch claude.
-	cmd := exec.Command("claude")
-	cmd.Dir = sessionDir
-	cmd.Env = env
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("starting claude: %w — is Claude Code installed? (npm install -g @anthropic-ai/claude-code)", err)
+	pid, err := launchInTmux(windowName, sessionDir, env, claudeArgs)
+	if err != nil {
+		return err
 	}
 
 	session := Session{
-		Name:      sessionName,
-		RepoName:  repo.Name,
-		Worktree:  opts.Worktree,
-		PID:       cmd.Process.Pid,
-		Dir:       sessionDir,
-		AgentMode: agentMode(opts.Teams),
-		Managed:   true,
-		Branch:    branchName,
-		StartedAt: time.Now(),
+		Name:       sessionName,
+		RepoName:   repo.Name,
+		Worktree:   opts.Worktree,
+		PID:        pid,
+		Dir:        sessionDir,
+		AgentMode:  agentMode(opts.Teams),
+		Managed:    true,
+		Branch:     branchName,
+		TmuxWindow: windowName,
+		StartedAt:  time.Now(),
 	}
 
 	if err := saveSession(cfg.Workspace.CloneRoot, session); err != nil {
 		fmt.Printf("  %s could not save session state: %v\n", warn("!"), err)
 	}
 
-	fmt.Printf("  %s session started (PID %d)\n", ok("✓"), cmd.Process.Pid)
+	fmt.Printf("  %s session started in tmux window '%s'\n", ok("✓"), windowName)
 	return nil
+}
+
+// launchInTmux starts claude in a tmux window. Creates the tmux session if needed.
+// Returns the PID of the tmux server (we track the window name for management).
+func launchInTmux(windowName, dir string, env []string, args []string) (int, error) {
+	// Build the claude command string for tmux send-keys.
+	claudeCmd := "claude"
+	for _, a := range args {
+		claudeCmd += " " + a
+	}
+
+	// Build env export prefix.
+	var envExports string
+	for _, e := range env {
+		// Only export our custom vars, not the full os.Environ().
+		envExports += fmt.Sprintf("export %s; ", e)
+	}
+
+	fullCmd := envExports + "cd " + dir + " && " + claudeCmd
+
+	// Check if our tmux session exists.
+	tmuxExists := runSilent("tmux", "has-session", "-t", tmuxSessionName) == nil
+
+	if !tmuxExists {
+		// Create a new tmux session with this window.
+		err := runSilent("tmux", "new-session", "-d", "-s", tmuxSessionName, "-n", windowName)
+		if err != nil {
+			return 0, fmt.Errorf("creating tmux session: %w — is tmux installed?", err)
+		}
+		// Send the command to the window.
+		if err := runSilent("tmux", "send-keys", "-t", tmuxSessionName+":"+windowName, fullCmd, "Enter"); err != nil {
+			return 0, fmt.Errorf("sending command to tmux: %w", err)
+		}
+	} else {
+		// Create a new window in the existing session.
+		if err := runSilent("tmux", "new-window", "-t", tmuxSessionName, "-n", windowName); err != nil {
+			return 0, fmt.Errorf("creating tmux window: %w", err)
+		}
+		if err := runSilent("tmux", "send-keys", "-t", tmuxSessionName+":"+windowName, fullCmd, "Enter"); err != nil {
+			return 0, fmt.Errorf("sending command to tmux: %w", err)
+		}
+	}
+
+	// Get the PID of the pane's shell process.
+	out, err := exec.Command("tmux", "list-panes", "-t", tmuxSessionName+":"+windowName, "-F", "#{pane_pid}").Output()
+	if err != nil {
+		return 0, nil // non-fatal — session is running, we just can't track the PID
+	}
+	pid := 0
+	fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &pid)
+
+	// If we're not already attached and in an interactive terminal, attach.
+	if os.Getenv("TMUX") == "" {
+		fmt.Printf("  %s Attaching to tmux session '%s'...\n", info("→"), tmuxSessionName)
+		attach := exec.Command("tmux", "attach-session", "-t", tmuxSessionName)
+		attach.Stdin = os.Stdin
+		attach.Stdout = os.Stdout
+		attach.Stderr = os.Stderr
+		_ = attach.Run()
+	} else {
+		// Already in tmux — switch to the new window.
+		_ = runSilent("tmux", "select-window", "-t", tmuxSessionName+":"+windowName)
+	}
+
+	return pid, nil
 }
 
 // ListSessions prints all tracked sessions and whether their processes are still running.
@@ -163,6 +288,10 @@ func ListSessions(cfg *config.WorkspaceConfig) error {
 
 	for _, s := range state.Sessions {
 		alive := processAlive(s.PID)
+		// Also check if the tmux window still exists.
+		if s.TmuxWindow != "" && !alive {
+			alive = runSilent("tmux", "has-session", "-t", tmuxSessionName+":"+s.TmuxWindow) == nil
+		}
 		status := ok("running")
 		if !alive {
 			status = warn("stopped")
@@ -171,11 +300,16 @@ func ListSessions(cfg *config.WorkspaceConfig) error {
 		if s.AgentMode == "teams" {
 			mode = fmt.Sprintf(" %s", info("[teams]"))
 		}
-		fmt.Printf("  %-30s PID %-8s %s%s\n",
+		tmux := ""
+		if s.TmuxWindow != "" {
+			tmux = fmt.Sprintf(" %s", info("["+tmuxSessionName+":"+s.TmuxWindow+"]"))
+		}
+		fmt.Printf("  %-30s PID %-8s %s%s%s\n",
 			s.Name,
 			strconv.Itoa(s.PID),
 			status,
 			mode,
+			tmux,
 		)
 		fmt.Printf("  %-30s %s\n\n", "", s.Dir)
 	}
@@ -197,11 +331,15 @@ func KillSessions(cloneRoot, name string) error {
 			remaining = append(remaining, s)
 			continue
 		}
+		// Kill the tmux window if it exists.
+		if s.TmuxWindow != "" {
+			_ = runSilent("tmux", "kill-window", "-t", tmuxSessionName+":"+s.TmuxWindow)
+		}
 		proc, err := os.FindProcess(s.PID)
 		if err == nil {
 			_ = proc.Kill()
-			fmt.Printf("  %s killed session %s (PID %d)\n", ok("✓"), s.Name, s.PID)
 		}
+		fmt.Printf("  %s killed session %s (PID %d)\n", ok("✓"), s.Name, s.PID)
 		if s.Managed {
 			removeSessionWorktree(cloneRoot, s)
 		}
@@ -221,7 +359,12 @@ func CleanupSessions(cloneRoot string, dryRun bool) error {
 	var alive []Session
 	cleaned := 0
 	for _, s := range state.Sessions {
-		if processAlive(s.PID) {
+		isAlive := processAlive(s.PID)
+		// Also check tmux window.
+		if s.TmuxWindow != "" && !isAlive {
+			isAlive = runSilent("tmux", "has-session", "-t", tmuxSessionName+":"+s.TmuxWindow) == nil
+		}
+		if isAlive {
 			alive = append(alive, s)
 			continue
 		}
@@ -250,14 +393,32 @@ func CleanupSessions(cloneRoot string, dryRun bool) error {
 func removeSessionWorktree(cloneRoot string, s Session) {
 	repoDir := filepath.Join(cloneRoot, s.RepoName)
 	if err := runSilent("git", "-C", repoDir, "worktree", "remove", "--force", s.Dir); err != nil {
-		// Worktree remove can fail if dir is already gone; force-remove the directory.
 		_ = os.RemoveAll(s.Dir)
 	}
-	// Clean up the branch.
 	if s.Branch != "" {
 		_ = runSilent("git", "-C", repoDir, "branch", "-D", s.Branch)
 	}
 	fmt.Printf("  %s removed worktree %s\n", ok("✓"), s.Dir)
+}
+
+func sessionEnv(cfg *config.WorkspaceConfig, opts SessionOptions) []string {
+	var env []string
+	for k, v := range cfg.Env {
+		env = append(env, k+"="+v)
+	}
+	if opts.Teams {
+		env = append(env, "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1")
+		fmt.Printf("  %s Agent teams mode enabled\n", warn("!"))
+	}
+	return env
+}
+
+func claudeArgs(opts SessionOptions) []string {
+	var args []string
+	if opts.DangerousPerms {
+		args = append(args, "--dangerously-skip-permissions")
+	}
+	return args
 }
 
 func saveSession(cloneRoot string, s Session) error {
@@ -299,11 +460,13 @@ func sessionsPath(cloneRoot string) string {
 }
 
 func processAlive(pid int) bool {
+	if pid == 0 {
+		return false
+	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		return false
 	}
-	// On Unix, FindProcess always succeeds; send signal 0 to check.
 	err = proc.Signal(syscall.Signal(0))
 	return err == nil
 }

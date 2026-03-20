@@ -1,0 +1,1 @@
+Read the task-runner agent instructions at ~/src/ownpulse/ownpulse-dev/agents/task-runner.md and follow them. The task index is at ~/src/ownpulse/.ownpulse-dev/tasks/index.json. Claim and execute the highest-priority unlocked task that either matches your working directory or is available.

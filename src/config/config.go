@@ -12,6 +12,7 @@ import (
 type WorkspaceConfig struct {
 	Workspace WorkspaceMeta       `toml:"workspace"`
 	Agents    AgentsConfig        `toml:"agents"`
+	Tasks     TasksConfig         `toml:"tasks"`
 	Env       map[string]string   `toml:"env"`
 	Repos     []RepoConfig        `toml:"repo"`
 
@@ -30,6 +31,10 @@ type WorkspaceMeta struct {
 
 type AgentsConfig struct {
 	DefinitionsPath string `toml:"definitions_path"`
+}
+
+type TasksConfig struct {
+	StateDir string `toml:"state_dir"`
 }
 
 type RepoConfig struct {

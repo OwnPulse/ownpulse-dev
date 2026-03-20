@@ -14,6 +14,11 @@ clone_root = "~/dev/ownpulse"
 # Agents are symlinked into each repo's .claude/agents/ directory at setup time.
 definitions_path = "../agents"
 
+[tasks]
+# Task state directory (plans, locks, done files, reviews).
+# Relative to clone_root. Default: .ownpulse-dev
+state_dir = ".ownpulse-dev"
+
 [env]
 # Environment variables set for all sessions.
 # Values starting with $ are read from the host environment.
@@ -31,26 +36,26 @@ description = "Main application — backend, web frontend, iOS"
 org = "ownpulse"                   # inherits default_org if omitted
 visibility = "public"
 branch = "main"
-agents = ["rust-backend", "react-frontend", "swift-ios", "code-review", "security-review", "principles-guardian"]
+agents = ["rust-backend", "react-frontend", "swift-ios", "code-review", "security-review", "principles-guardian", "session-launcher", "task-runner"]
 worktrees = ["backend", "web", "ios"]
 
 [[repo]]
 name = "ownpulse-infra"
 description = "Infrastructure — OpenTofu, Helm charts, Ansible"
 visibility = "private"
-agents = ["k8s-infra", "security-review"]
+agents = ["k8s-infra", "security-review", "session-launcher", "task-runner"]
 worktrees = ["infra"]
 
 [[repo]]
 name = "ownpulse-web"
 description = "Public marketing site — Astro"
 visibility = "public"
-agents = ["react-frontend", "code-review"]
+agents = ["react-frontend", "code-review", "session-launcher", "task-runner"]
 worktrees = []
 
 [[repo]]
 name = "ownpulse-dev"
 description = "This tool — workspace bootstrapper and agent definitions"
 visibility = "public"
-agents = ["code-review"]
+agents = ["code-review", "session-launcher", "task-runner"]
 worktrees = []
