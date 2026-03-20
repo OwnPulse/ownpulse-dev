@@ -27,8 +27,8 @@ func main() {
 		Short: "OwnPulse developer workspace tool",
 		Long: `opdev sets up the OwnPulse development workspace.
 
-It clones repos, creates git worktrees, and links Claude Code agent
-definitions so you can cd into any repo and run claude.
+It clones repos and links Claude Code agent definitions so you can
+cd into any repo and run claude.
 
 Configuration is driven by workspace.toml. For hosted/private workspaces,
 create a workspace.override.toml alongside it.`,
@@ -55,7 +55,7 @@ func setupCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "setup",
-		Short: "Clone repos, create worktrees, link agents",
+		Short: "Clone repos and link agent definitions",
 		Example: `  opdev setup
   opdev setup --repos ownpulse`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -87,7 +87,7 @@ func teardownCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "teardown",
-		Short: "Remove worktrees and optionally repo directories",
+		Short: "Remove repo directories and prune worktrees",
 		Example: `  opdev teardown
   opdev teardown --repos ownpulse
   opdev teardown --remove-repos`,
