@@ -6,14 +6,13 @@
 name = "ownpulse"
 default_org = "ownpulse"
 default_branch = "main"
-# Root directory where all repos will be cloned, relative to workspace file location.
-# Can be overridden with OWNPULSE_WORKSPACE_DIR env var.
+# Root directory where all repos will be cloned.
 clone_root = "~/dev/ownpulse"
 
 [agents]
 # Path to agent definitions, relative to this file.
 # Agents are symlinked into each repo's .claude/agents/ directory at setup time.
-definitions_path = "./agents"
+definitions_path = "../agents"
 
 [env]
 # Environment variables set for all sessions.

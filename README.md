@@ -1,114 +1,144 @@
 # ownpulse-dev
 
-Developer workspace tool for OwnPulse. Handles repo checkout, git worktrees, Claude Code agent definitions, and session management.
+Developer workspace tool for OwnPulse. Bootstraps repos, creates git worktrees, links Claude Code agent definitions, and manages isolated Claude Code sessions.
 
-## Quickstart
+## Install
 
 ```bash
-# Clone this repo first — it's the entry point for all OwnPulse development.
 git clone git@github.com:ownpulse/ownpulse-dev.git
 cd ownpulse-dev
-
-# Build the CLI
-go build -o opdev ./src
-
-# Set up the full workspace (clones all repos, creates worktrees, links agents)
-./opdev setup
-
-# Or pick specific repos
-./opdev setup --repos ownpulse,ownpulse-infra
-
-# See what would happen without making changes
-./opdev setup --dry-run
+make install    # builds and copies to $GOPATH/bin
 ```
 
-## Hosted / private workspace
-
-If you work on the hosted OwnPulse product, create a `config/workspace.override.toml` alongside the base config:
+Or build locally:
 
 ```bash
-cp config/workspace.override.toml.example config/workspace.override.toml
-# Edit it with your org name, private repos, and extra env vars
-# Add it to .gitignore — it's not committed
+make build      # produces ./opdev
 ```
 
-The override file is deep-merged over the base config. It can add repos, override repo settings (org, branch), and add environment variables. See the example file for full documentation.
+Requires Go 1.22+, Git, and [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`npm install -g @anthropic-ai/claude-code`).
+
+## Getting started
+
+```bash
+# Set up the full workspace — clones all repos, creates worktrees, links agents
+opdev setup
+
+# Spawn a Claude Code session (creates an isolated worktree)
+opdev session ownpulse
+
+# Spawn another session for the same repo — they don't conflict
+opdev session ownpulse
+
+# Session branching from a named worktree
+opdev session ownpulse --worktree backend
+
+# See what's running
+opdev status
+
+# Clean up dead sessions and their worktrees
+opdev cleanup
+```
+
+## How sessions work
+
+Every `opdev session` creates a **new git worktree** with a unique branch (`session/<id>`). This means:
+
+- Multiple sessions can run against the same repo in parallel without conflicts.
+- Each session gets its own copy of the working tree, so agents can freely modify files.
+- Agent definitions are automatically symlinked into each session worktree.
+- When a session's Claude Code process exits, `opdev cleanup` removes the worktree and branch.
+
+The session worktree directories are named `<repo>-session-<id>` (or `<repo>-<worktree>-session-<id>` when using `--worktree`).
 
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `opdev setup` | Clone repos, create worktrees, link agent definitions |
-| `opdev session <repo>` | Spawn a Claude Code session for a repo or worktree |
-| `opdev status` | Show tracked Claude Code sessions and their status |
+| `opdev session <repo>` | Create an isolated worktree and launch Claude Code in it |
+| `opdev status` | Show tracked sessions and whether they're running |
+| `opdev cleanup` | Remove stopped sessions and their worktrees |
 | `opdev list` | List repos and agents from the merged workspace config |
 | `opdev teardown` | Remove worktrees (and optionally repos) |
 
-### Useful flags
+### Flags
 
 ```bash
+# Global
+opdev --config /path/to/workspace.toml <cmd>   # explicit config path
+opdev --overlay /path/to/override.toml <cmd>    # explicit overlay path
+opdev --dry-run <cmd>                           # preview without changes
+
+# setup
 opdev setup --repos ownpulse          # set up one repo only
-opdev setup --local                   # use local toolchain instead of Docker
-opdev setup --dry-run                 # preview without making changes
-opdev session ownpulse --worktree backend         # session in the backend worktree
-opdev session ownpulse --teams                    # enable experimental agent teams mode
-opdev teardown --kill-sessions --remove-repos     # full reset
-opdev --config /path/to/workspace.toml <cmd>      # explicit config path
-opdev --overlay /path/to/override.toml <cmd>      # explicit overlay path
+opdev setup --local                   # skip Docker, use local toolchain
+
+# session
+opdev session ownpulse --worktree backend   # branch from worktree/backend
+opdev session ownpulse --teams              # enable agent teams mode
+
+# teardown
+opdev teardown --kill-sessions              # kill sessions before tearing down
+opdev teardown --remove-repos               # also delete cloned repo dirs
 ```
 
-## Agent definitions
+## Configuration
 
-Agent definitions live in `agents/`. Each `.md` file is a Claude Code subagent — it gets symlinked into `.claude/agents/` in the relevant repos during setup.
+Config lives in `config/workspace.toml`. For private repos or local overrides, create `config/workspace.override.toml` (gitignored):
 
-| Agent | Purpose | Access |
-|---|---|---|
-| `rust-backend` | Axum/sqlx backend development | Read, Write, Edit, Bash |
-| `react-frontend` | React/Vite frontend and Astro public site | Read, Write, Edit, Bash |
-| `swift-ios` | SwiftUI app and HealthKit integration | Read, Write, Edit, Bash |
-| `k8s-infra` | Helm, OpenTofu, GitHub Actions | Read, Write, Edit, Bash |
-| `security-review` | Security audit — read-only | Read, Glob, Grep |
-| `code-review` | Code quality review — read-only | Read, Glob, Grep |
-| `principles-guardian` | Data cooperative principles audit — read-only | Read, Glob, Grep |
-
-To add an agent: create a new `.md` file in `agents/`, add it to the relevant `agents` list in `config/workspace.toml`, and re-run `opdev setup`.
-
-## Config structure
-
-```
-config/
-  workspace.toml               # base config (committed)
-  workspace.override.toml      # local overrides (gitignored)
-  workspace.override.toml.example  # template for override file
+```bash
+cp config/workspace.override.toml.example config/workspace.override.toml
 ```
 
-### Adding a new repo
+The override file is deep-merged over the base — it can add repos, override repo settings, and set environment variables.
 
-In `workspace.toml`, add a `[[repo]]` block:
+### Adding a repo
+
+Add a `[[repo]]` block to `workspace.toml` (or to your override file for private repos):
 
 ```toml
 [[repo]]
 name = "ownpulse-newservice"
 description = "What this repo does"
-visibility = "private"           # or "public"
+visibility = "private"
 agents = ["rust-backend", "security-review"]
-worktrees = ["feature-a"]        # creates a worktree/<name> branch per entry
+worktrees = ["feature-a"]
 ```
 
-For hosted/private repos, add them to your `workspace.override.toml` instead so they don't appear in the public config.
+Then run `opdev setup --repos ownpulse-newservice`.
 
-## Prerequisites
+### Environment variables
 
-- Go 1.22+
-- Git
-- Docker (for `--container` mode, the default)
-- Claude Code (`npm install -g @anthropic-ai/claude-code`)
-- GitHub SSH access configured for the `ownpulse` org
+Variables defined in `[env]` are injected into every Claude Code session:
+
+```toml
+[env]
+OWNPULSE_ENV = "development"
+MY_API_KEY = "..."
+```
+
+## Agent definitions
+
+Agent definitions live in `agents/`. Each `.md` file is a Claude Code agent — symlinked into `.claude/agents/` in repos during setup and session creation.
+
+| Agent | Purpose | Access |
+|---|---|---|
+| `rust-backend` | Axum/sqlx backend development | Read, Write, Edit, Bash |
+| `react-frontend` | React/Vite frontend and Astro site | Read, Write, Edit, Bash |
+| `swift-ios` | SwiftUI and HealthKit integration | Read, Write, Edit, Bash |
+| `k8s-infra` | Helm, OpenTofu, GitHub Actions | Read, Write, Edit, Bash |
+| `security-review` | Security audit (read-only) | Read, Glob, Grep |
+| `code-review` | Code quality review (read-only) | Read, Glob, Grep |
+| `principles-guardian` | Data cooperative principles audit (read-only) | Read, Glob, Grep |
+
+To add an agent: create a `.md` file in `agents/`, add it to the `agents` list in the relevant `[[repo]]` block, and re-run `opdev setup`.
 
 ## Development
 
 ```bash
-go build -o opdev ./src
-go test ./...
-go vet ./...
+make build      # build
+make test       # run tests
+make lint       # go vet + golangci-lint
+make release    # cross-compile for all platforms
 ```
