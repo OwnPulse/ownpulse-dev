@@ -22,10 +22,10 @@ var (
 type SetupOptions struct {
 	Repos      []string // empty = all repos in config
 	DryRun     bool
-	AgentsPath string   // resolved absolute path to agent definitions
+	AgentsPath string // resolved absolute path to agent definitions
 }
 
-// Setup clones repos, creates worktrees, and links agent definitions.
+// Setup clones repos and links agent definitions.
 func Setup(cfg *config.WorkspaceConfig, opts SetupOptions) error {
 	repos := filterRepos(cfg.Repos, opts.Repos)
 	if len(repos) == 0 {
@@ -42,6 +42,8 @@ func Setup(cfg *config.WorkspaceConfig, opts SetupOptions) error {
 	}
 
 	fmt.Printf("\n%s Workspace ready at %s\n", ok("✓"), cfg.Workspace.CloneRoot)
+	fmt.Printf("  cd into any repo and run claude — agents are linked.\n")
+	fmt.Printf("  Agents create their own worktrees for isolation.\n\n")
 	return nil
 }
 
@@ -60,45 +62,12 @@ func setupRepo(cfg *config.WorkspaceConfig, repo config.RepoConfig, opts SetupOp
 			}
 		}
 	} else {
-		fmt.Printf("    %s already cloned, skipping\n", warn("~"))
+		fmt.Printf("    %s already cloned\n", warn("~"))
 	}
 
-	// Create worktrees.
-	for _, wt := range repo.Worktrees {
-		wtDir := filepath.Join(cfg.Workspace.CloneRoot, repo.Name+"-"+wt)
-		wtBranch := fmt.Sprintf("worktree/%s", wt)
-
-		if _, err := os.Stat(wtDir); os.IsNotExist(err) {
-			fmt.Printf("    creating worktree %s → %s\n", wt, wtDir)
-			if !opts.DryRun {
-				// Create the branch if it doesn't exist, then add worktree.
-				branchExists := runSilent("git", "-C", repoDir, "show-ref", "--verify", "--quiet", "refs/heads/"+wtBranch) == nil
-				args := []string{"-C", repoDir, "worktree", "add", wtDir}
-				if branchExists {
-					args = append(args, wtBranch)
-				} else {
-					args = append(args, "-b", wtBranch)
-				}
-				if err := run("git", args...); err != nil {
-					return fmt.Errorf("git worktree add %s: %w", wt, err)
-				}
-			}
-		} else {
-			fmt.Printf("    %s worktree %s already exists\n", warn("~"), wt)
-		}
-	}
-
-	// Link agent definitions into main repo dir.
+	// Link agent definitions.
 	if err := LinkAgents(repoDir, repo.Agents, opts.AgentsPath, opts.DryRun); err != nil {
 		return fmt.Errorf("linking agents: %w", err)
-	}
-
-	// Link agent definitions into each worktree dir.
-	for _, wt := range repo.Worktrees {
-		wtDir := filepath.Join(cfg.Workspace.CloneRoot, repo.Name+"-"+wt)
-		if err := LinkAgents(wtDir, repo.Agents, opts.AgentsPath, opts.DryRun); err != nil {
-			return fmt.Errorf("linking agents to worktree %s: %w", wt, err)
-		}
 	}
 
 	fmt.Printf("    %s done\n", ok("✓"))
@@ -129,7 +98,6 @@ func LinkAgents(targetDir string, agentNames []string, agentsPath string, dryRun
 		}
 
 		if !dryRun {
-			// Remove existing symlink or file before (re)linking.
 			_ = os.Remove(dst)
 			if err := os.Symlink(src, dst); err != nil {
 				return fmt.Errorf("symlink agent %s: %w", agentName, err)
@@ -141,7 +109,7 @@ func LinkAgents(targetDir string, agentNames []string, agentsPath string, dryRun
 	return nil
 }
 
-// Teardown removes worktrees and optionally the repo directories.
+// Teardown removes repo directories.
 func Teardown(cfg *config.WorkspaceConfig, repos []string, removeRepos bool, dryRun bool) error {
 	targets := filterRepos(cfg.Repos, repos)
 
@@ -150,13 +118,9 @@ func Teardown(cfg *config.WorkspaceConfig, repos []string, removeRepos bool, dry
 	for _, repo := range targets {
 		repoDir := filepath.Join(cfg.Workspace.CloneRoot, repo.Name)
 
-		for _, wt := range repo.Worktrees {
-			wtDir := filepath.Join(cfg.Workspace.CloneRoot, repo.Name+"-"+wt)
-			fmt.Printf("  removing worktree %s\n", wtDir)
-			if !dryRun {
-				_ = run("git", "-C", repoDir, "worktree", "remove", "--force", wtDir)
-				_ = os.RemoveAll(wtDir)
-			}
+		// Prune any worktrees (agent-created or otherwise).
+		if !dryRun {
+			_ = runSilent("git", "-C", repoDir, "worktree", "prune")
 		}
 
 		if removeRepos {
@@ -171,7 +135,6 @@ func Teardown(cfg *config.WorkspaceConfig, repos []string, removeRepos bool, dry
 	return nil
 }
 
-// filterRepos returns only repos matching the given names, or all repos if names is empty.
 func filterRepos(all []config.RepoConfig, names []string) []config.RepoConfig {
 	if len(names) == 0 {
 		return all

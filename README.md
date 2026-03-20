@@ -1,6 +1,6 @@
 # ownpulse-dev
 
-Sets up the OwnPulse development workspace: clones repos, creates git worktrees, and symlinks Claude Code agent definitions.
+Sets up the OwnPulse development workspace and provides Claude Code agent definitions.
 
 ## Install
 
@@ -11,7 +11,7 @@ make build            # requires Docker or Go 1.22+
 sudo make install     # installs to /usr/local/bin
 ```
 
-Add to `~/.zshrc` so `opdev` finds its config from anywhere:
+Add to `~/.zshrc`:
 
 ```bash
 export OPDEV_CONFIG=~/src/ownpulse/ownpulse-dev/config/workspace.toml
@@ -20,52 +20,39 @@ export OPDEV_CONFIG=~/src/ownpulse/ownpulse-dev/config/workspace.toml
 ## Usage
 
 ```bash
-# Set up the workspace — clones all repos, creates worktrees, links agents
-opdev setup
-
-# Set up one repo
-opdev setup --repos ownpulse
-
-# See what's configured
-opdev list
-
-# Preview without making changes
-opdev setup --dry-run
-
-# Remove worktrees
-opdev teardown
-
-# Remove everything including repo dirs
-opdev teardown --remove-repos
+opdev setup               # clone all repos, link agents
+opdev setup --repos ownpulse  # one repo
+opdev list                # show config
+opdev teardown            # clean up
 ```
 
-After setup, `cd` into any repo or worktree and run `claude` — the agents are already linked.
+After setup, `cd` into any repo and run `claude`:
 
 ```bash
-cd ~/src/ownpulse/ownpulse          # main repo
-cd ~/src/ownpulse/ownpulse-backend  # backend worktree
-claude                               # agents are ready
+cd ~/src/ownpulse/ownpulse
+claude
 ```
 
-## What it does
+Agents are symlinked and ready. Write agents automatically create git worktrees for isolation — multiple sessions can run in parallel without conflicts.
 
-1. **Clones repos** from GitHub into `clone_root` (configured in `workspace.toml`)
-2. **Creates git worktrees** — e.g., `ownpulse-backend`, `ownpulse-web`, `ownpulse-ios`
-3. **Symlinks agent definitions** from `agents/` into each repo's `.claude/agents/` directory
+## How it works
 
-## Agent definitions
+1. **`opdev setup`** clones repos from GitHub and symlinks agent `.md` files into each repo's `.claude/agents/`
+2. You run `claude` in any repo
+3. When you invoke a write agent (e.g., `rust-backend`), it creates a git worktree, copies `.claude/` into it, and works there in isolation
+4. Read-only agents (`code-review`, `security-review`) work directly — no worktree needed
 
-| Agent | Purpose | Access |
+## Agents
+
+| Agent | Purpose | Isolation |
 |---|---|---|
-| `rust-backend` | Axum/sqlx backend development | Read, Write, Edit, Bash |
-| `react-frontend` | React/Vite frontend and Astro site | Read, Write, Edit, Bash |
-| `swift-ios` | SwiftUI and HealthKit integration | Read, Write, Edit, Bash |
-| `k8s-infra` | Helm, OpenTofu, GitHub Actions | Read, Write, Edit, Bash |
-| `security-review` | Security audit (read-only) | Read, Glob, Grep |
-| `code-review` | Code quality review (read-only) | Read, Glob, Grep |
-| `principles-guardian` | Data cooperative principles audit (read-only) | Read, Glob, Grep |
-
-To add an agent: create a `.md` file in `agents/`, add it to the `agents` list in `workspace.toml`, run `opdev setup`.
+| `rust-backend` | Axum/sqlx backend | creates worktree |
+| `react-frontend` | React/Vite frontend, Astro site | creates worktree |
+| `swift-ios` | SwiftUI, HealthKit | creates worktree |
+| `k8s-infra` | Helm, OpenTofu, GitHub Actions | creates worktree |
+| `security-review` | Security audit | read-only |
+| `code-review` | Code quality review | read-only |
+| `principles-guardian` | Data cooperative principles | read-only |
 
 ## Configuration
 
@@ -75,10 +62,16 @@ Base config: `config/workspace.toml`. For local overrides (e.g., different `clon
 cp config/workspace.override.toml.example config/workspace.override.toml
 ```
 
-## Development
+### Adding a repo
 
-```bash
-make build      # build
-make test       # run tests
-make lint       # go vet + golangci-lint
+```toml
+[[repo]]
+name = "my-repo"
+description = "What it does"
+visibility = "private"
+agents = ["rust-backend", "security-review"]
 ```
+
+### Adding an agent
+
+Create `agents/<name>.md`, add it to the repo's `agents` list, run `opdev setup`.

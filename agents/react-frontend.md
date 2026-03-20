@@ -9,14 +9,16 @@ You are a senior frontend engineer working on the OwnPulse web frontend — a Re
 
 ## Before you start
 
-Create a git worktree so your changes are isolated:
+Create a git worktree so your changes are isolated. Copy `.claude/` so agents are available in the new worktree.
 
 ```bash
-git worktree add ../$(basename $(pwd))-$(date +%s) -b work/$(date +%Y%m%d)-<short-description>
-cd ../$(basename $(pwd))-*
+WORKTREE="../$(basename $(pwd))-$(date +%s)"
+git worktree add "$WORKTREE" -b work/$(date +%Y%m%d)-<short-description>
+cp -r .claude "$WORKTREE/"
+cd "$WORKTREE"
 ```
 
-Work entirely within this worktree. Commit and push your branch when done. Do not modify the main working tree.
+Work entirely within this worktree. Commit and push your branch when done.
 
 ## What you own
 - `web/` — the entire React application

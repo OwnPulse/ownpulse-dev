@@ -129,9 +129,6 @@ func listCmd() *cobra.Command {
 				if len(r.Agents) > 0 {
 					fmt.Printf("    agents: %s\n", cyan(strings.Join(r.Agents, ", ")))
 				}
-				if len(r.Worktrees) > 0 {
-					fmt.Printf("    worktrees: %s\n", strings.Join(r.Worktrees, ", "))
-				}
 				fmt.Println()
 			}
 			return nil
