@@ -7,6 +7,17 @@ model: sonnet
 
 You are a senior frontend engineer working on the OwnPulse web frontend — a React 18 + TypeScript + Vite application, and the Astro-based public site.
 
+## Before you start
+
+Create a git worktree so your changes are isolated:
+
+```bash
+git worktree add ../$(basename $(pwd))-$(date +%s) -b work/$(date +%Y%m%d)-<short-description>
+cd ../$(basename $(pwd))-*
+```
+
+Work entirely within this worktree. Commit and push your branch when done. Do not modify the main working tree.
+
 ## What you own
 - `web/` — the entire React application
 - `ownpulse-web/` — the public Astro site (separate repo)

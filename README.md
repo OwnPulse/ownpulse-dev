@@ -1,118 +1,59 @@
 # ownpulse-dev
 
-Developer workspace tool for OwnPulse. Bootstraps repos, creates git worktrees, links Claude Code agent definitions, and manages parallel Claude Code sessions via tmux.
+Sets up the OwnPulse development workspace: clones repos, creates git worktrees, and symlinks Claude Code agent definitions.
 
 ## Install
 
 ```bash
 git clone git@github.com:ownpulse/ownpulse-dev.git
 cd ownpulse-dev
-
-# Build (requires Docker or Go 1.22+)
-make build
-
-# Install to /usr/local/bin
-sudo make install
+make build            # requires Docker or Go 1.22+
+sudo make install     # installs to /usr/local/bin
 ```
 
-Prebuilt binaries are available on the [releases page](https://github.com/ownpulse/ownpulse-dev/releases).
-
-### Prerequisites
-
-- Git
-- [tmux](https://github.com/tmux/tmux) — sessions run in tmux windows
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`npm install -g @anthropic-ai/claude-code`)
-- Docker or Go 1.22+ (for building)
-
-### Configuration
-
-Add to your `~/.zshrc` so `opdev` finds its config from anywhere:
+Add to `~/.zshrc` so `opdev` finds its config from anywhere:
 
 ```bash
 export OPDEV_CONFIG=~/src/ownpulse/ownpulse-dev/config/workspace.toml
 ```
 
-Without this, `opdev` checks (in order): `--config` flag, `OPDEV_CONFIG` env var, `~/.config/ownpulse/workspace.toml`, `./config/workspace.toml`, `./workspace.toml`.
-
-For private repos or local overrides, create `config/workspace.override.toml` (gitignored):
+## Usage
 
 ```bash
-cp config/workspace.override.toml.example config/workspace.override.toml
-```
-
-## Getting started
-
-```bash
-# Set up the workspace — clones repos, creates worktrees, links agents
+# Set up the workspace — clones all repos, creates worktrees, links agents
 opdev setup
 
-# Launch a cross-repo session with all agents (in tmux)
-opdev session
+# Set up one repo
+opdev setup --repos ownpulse
 
-# Launch a session scoped to one repo
-opdev session ownpulse
+# See what's configured
+opdev list
 
-# Launch a session from a named worktree branch
-opdev session ownpulse --worktree backend
+# Preview without making changes
+opdev setup --dry-run
 
-# Skip Claude Code permission prompts
-opdev session --dangerously-skip-permissions
+# Remove worktrees
+opdev teardown
 
-# See what's running
-opdev status
-
-# Clean up dead sessions and their worktrees
-opdev cleanup
+# Remove everything including repo dirs
+opdev teardown --remove-repos
 ```
 
-## How sessions work
-
-Every `opdev session` runs Claude Code in a **tmux window** inside a shared tmux session called `opdev`. This means:
-
-- **Multiple sessions run in parallel** — each in its own tmux window. Switch between them with `Ctrl-b` + window number.
-- **Repo sessions get isolated worktrees** — `opdev session <repo>` creates a new git worktree (`session/<id>` branch) so agents can freely modify files without conflicts.
-- **Workspace sessions** (`opdev session` with no repo) launch in the workspace root with all agents from all repos linked. Use this for cross-cutting features.
-- **Agent definitions are symlinked** into each session automatically.
-- **`opdev cleanup`** removes dead sessions and their worktrees/branches.
-
-If you're already inside tmux, `opdev session` creates a new window and switches to it. If you're outside tmux, it creates the session and attaches.
-
-## Commands
-
-| Command | What it does |
-|---|---|
-| `opdev setup` | Clone repos, create worktrees, link agent definitions |
-| `opdev session [repo]` | Launch Claude Code in a tmux window |
-| `opdev status` | Show tracked sessions and their status |
-| `opdev cleanup` | Remove stopped sessions and their worktrees |
-| `opdev list` | List repos and agents from the merged config |
-| `opdev teardown` | Remove worktrees (and optionally repos) |
-
-### Flags
+After setup, `cd` into any repo or worktree and run `claude` — the agents are already linked.
 
 ```bash
-# Global
-opdev --config /path/to/workspace.toml <cmd>
-opdev --overlay /path/to/override.toml <cmd>
-opdev --dry-run <cmd>
-
-# setup
-opdev setup --repos ownpulse          # one repo only
-opdev setup --local                   # local toolchain, no Docker
-
-# session
-opdev session ownpulse --worktree backend           # branch from worktree/backend
-opdev session --teams                               # enable agent teams mode
-opdev session --dangerously-skip-permissions         # skip permission prompts
-
-# teardown
-opdev teardown --kill-sessions        # kill sessions before tearing down
-opdev teardown --remove-repos         # also delete cloned repo dirs
+cd ~/src/ownpulse/ownpulse          # main repo
+cd ~/src/ownpulse/ownpulse-backend  # backend worktree
+claude                               # agents are ready
 ```
 
-## Agent definitions
+## What it does
 
-Agent definitions live in `agents/`. Each `.md` file is a Claude Code agent — symlinked into `.claude/agents/` during setup and session creation.
+1. **Clones repos** from GitHub into `clone_root` (configured in `workspace.toml`)
+2. **Creates git worktrees** — e.g., `ownpulse-backend`, `ownpulse-web`, `ownpulse-ios`
+3. **Symlinks agent definitions** from `agents/` into each repo's `.claude/agents/` directory
+
+## Agent definitions
 
 | Agent | Purpose | Access |
 |---|---|---|
@@ -123,48 +64,15 @@ Agent definitions live in `agents/`. Each `.md` file is a Claude Code agent — 
 | `security-review` | Security audit (read-only) | Read, Glob, Grep |
 | `code-review` | Code quality review (read-only) | Read, Glob, Grep |
 | `principles-guardian` | Data cooperative principles audit (read-only) | Read, Glob, Grep |
-| `session-launcher` | Launch additional Claude Code sessions via opdev | Read, Bash |
-| `task-runner` | Autonomous task execution from the task queue | Read, Write, Edit, Bash, Glob, Grep |
 
-To add an agent: create a `.md` file in `agents/`, add it to the `agents` list in the relevant `[[repo]]` block, and re-run `opdev setup`.
+To add an agent: create a `.md` file in `agents/`, add it to the `agents` list in `workspace.toml`, run `opdev setup`.
 
-### Adding a repo
+## Configuration
 
-```toml
-[[repo]]
-name = "ownpulse-newservice"
-description = "What this repo does"
-visibility = "private"
-agents = ["rust-backend", "security-review"]
-worktrees = ["feature-a"]
-```
-
-### Environment variables
-
-Variables in `[env]` are injected into every Claude Code session:
-
-```toml
-[env]
-OWNPULSE_ENV = "development"
-```
-
-## Task system
-
-An autonomous task queue for parallel Claude Code work. Reviews and plans generate tasks; sessions pick them up and execute them.
-
-Task state lives in `<clone_root>/.ownpulse-dev/tasks/` (runtime, not committed). Task definitions — the agent and bootstrap prompt — live in this repo under `tasks/` and `agents/task-runner.md`.
-
-See [tasks/README.md](tasks/README.md) for full documentation.
+Base config: `config/workspace.toml`. For local overrides (e.g., different `clone_root`):
 
 ```bash
-# In any session, the task-runner agent will automatically:
-# 1. Read the task index
-# 2. Claim the highest-priority unlocked task
-# 3. Execute the plan
-# 4. Commit and mark done
-
-# Or bootstrap manually:
-claude -p "$(cat ~/src/ownpulse/ownpulse-dev/tasks/PROMPT.md)"
+cp config/workspace.override.toml.example config/workspace.override.toml
 ```
 
 ## Development
@@ -173,5 +81,4 @@ claude -p "$(cat ~/src/ownpulse/ownpulse-dev/tasks/PROMPT.md)"
 make build      # build
 make test       # run tests
 make lint       # go vet + golangci-lint
-make release    # cross-compile for all platforms
 ```

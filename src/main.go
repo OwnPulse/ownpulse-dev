@@ -25,25 +25,22 @@ func main() {
 	root := &cobra.Command{
 		Use:   "opdev",
 		Short: "OwnPulse developer workspace tool",
-		Long: `opdev bootstraps and manages the OwnPulse development workspace.
+		Long: `opdev sets up the OwnPulse development workspace.
 
-It clones repos, creates git worktrees, links Claude Code agent definitions,
-and manages Claude Code sessions via tmux.
+It clones repos, creates git worktrees, and links Claude Code agent
+definitions so you can cd into any repo and run claude.
 
 Configuration is driven by workspace.toml. For hosted/private workspaces,
-create a workspace.override.toml alongside it — see config/workspace.override.toml.example.`,
+create a workspace.override.toml alongside it.`,
 		Version: version,
 	}
 
-	root.PersistentFlags().StringVar(&configPath, "config", "", "path to workspace.toml (default: ./config/workspace.toml)")
-	root.PersistentFlags().StringVar(&overlayPath, "overlay", "", "path to workspace.override.toml (default: auto-detected alongside config)")
+	root.PersistentFlags().StringVar(&configPath, "config", "", "path to workspace.toml")
+	root.PersistentFlags().StringVar(&overlayPath, "overlay", "", "path to workspace.override.toml")
 	root.PersistentFlags().BoolVar(&dryRun, "dry-run", false, "print what would happen without making changes")
 
 	root.AddCommand(
 		setupCmd(),
-		sessionCmd(),
-		statusCmd(),
-		cleanupCmd(),
 		teardownCmd(),
 		listCmd(),
 	)
@@ -53,18 +50,14 @@ create a workspace.override.toml alongside it — see config/workspace.override.
 	}
 }
 
-// setupCmd clones repos, creates worktrees, links agents.
 func setupCmd() *cobra.Command {
 	var repos []string
-	var local bool
 
 	cmd := &cobra.Command{
 		Use:   "setup",
-		Short: "Bootstrap the workspace — clone repos, create worktrees, link agents",
-		Example: `  opdev setup                        # set up all repos
-  opdev setup --repos ownpulse        # set up one repo
-  opdev setup --local                 # skip Docker, use local toolchain
-  opdev setup --overlay ./workspace.override.toml`,
+		Short: "Clone repos, create worktrees, link agents",
+		Example: `  opdev setup
+  opdev setup --repos ownpulse`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := loadConfig()
 			if err != nil {
@@ -78,140 +71,44 @@ func setupCmd() *cobra.Command {
 
 			return workspace.Setup(cfg, workspace.SetupOptions{
 				Repos:      repos,
-				Container:  !local,
 				DryRun:     dryRun,
 				AgentsPath: agentsPath,
 			})
 		},
 	}
 
-	cmd.Flags().StringSliceVar(&repos, "repos", nil, "comma-separated repo names to set up (default: all)")
-	cmd.Flags().BoolVar(&local, "local", false, "use local toolchain instead of Docker containers")
+	cmd.Flags().StringSliceVar(&repos, "repos", nil, "repos to set up (default: all)")
 	return cmd
 }
 
-// sessionCmd spawns a Claude Code session in a tmux window.
-func sessionCmd() *cobra.Command {
-	var worktree string
-	var teams bool
-	var dangerousPerms bool
-
-	cmd := &cobra.Command{
-		Use:   "session [repo]",
-		Short: "Spawn a Claude Code session in a tmux window",
-		Example: `  opdev session                                    # cross-repo session with all agents
-  opdev session ownpulse                           # session branching from main
-  opdev session ownpulse --worktree backend        # session branching from backend worktree
-  opdev session ownpulse --teams                   # enable experimental agent teams
-  opdev session --dangerously-skip-permissions     # skip Claude Code permission prompts`,
-		Args: cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig()
-			if err != nil {
-				return err
-			}
-
-			agentsPath, err := resolveAgentsPath(cfg)
-			if err != nil {
-				return err
-			}
-
-			if len(args) == 0 {
-				return workspace.SpawnWorkspaceSession(cfg, workspace.SessionOptions{
-					Teams:          teams,
-					DryRun:         dryRun,
-					AgentsPath:     agentsPath,
-					DangerousPerms: dangerousPerms,
-				})
-			}
-
-			return workspace.SpawnSession(cfg, workspace.SessionOptions{
-				RepoName:       args[0],
-				Worktree:       worktree,
-				Teams:          teams,
-				DryRun:         dryRun,
-				AgentsPath:     agentsPath,
-				DangerousPerms: dangerousPerms,
-			})
-		},
-	}
-
-	cmd.Flags().StringVar(&worktree, "worktree", "", "base the session on this worktree branch")
-	cmd.Flags().BoolVar(&teams, "teams", false, "set CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 for this session")
-	cmd.Flags().BoolVar(&dangerousPerms, "dangerously-skip-permissions", false, "pass --dangerously-skip-permissions to Claude Code")
-	return cmd
-}
-
-// statusCmd shows all tracked sessions.
-func statusCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "status",
-		Short: "Show status of tracked Claude Code sessions",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig()
-			if err != nil {
-				return err
-			}
-			return workspace.ListSessions(cfg)
-		},
-	}
-}
-
-// cleanupCmd removes dead session worktrees.
-func cleanupCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "cleanup",
-		Short: "Remove stopped session worktrees and prune session state",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig()
-			if err != nil {
-				return err
-			}
-			return workspace.CleanupSessions(cfg.Workspace.CloneRoot, dryRun)
-		},
-	}
-}
-
-// teardownCmd removes worktrees and optionally repos.
 func teardownCmd() *cobra.Command {
 	var repos []string
 	var removeRepos bool
-	var killSessions bool
 
 	cmd := &cobra.Command{
 		Use:   "teardown",
 		Short: "Remove worktrees and optionally repo directories",
-		Example: `  opdev teardown                     # remove all worktrees
-  opdev teardown --repos ownpulse    # remove worktrees for one repo
-  opdev teardown --remove-repos      # also delete repo directories
-  opdev teardown --kill-sessions     # kill tracked Claude Code sessions first`,
+		Example: `  opdev teardown
+  opdev teardown --repos ownpulse
+  opdev teardown --remove-repos`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := loadConfig()
 			if err != nil {
 				return err
 			}
-
-			if killSessions {
-				if err := workspace.KillSessions(cfg.Workspace.CloneRoot, ""); err != nil {
-					fmt.Fprintf(os.Stderr, "%s failed to kill sessions: %v\n", color.YellowString("!"), err)
-				}
-			}
-
 			return workspace.Teardown(cfg, repos, removeRepos, dryRun)
 		},
 	}
 
 	cmd.Flags().StringSliceVar(&repos, "repos", nil, "repos to tear down (default: all)")
-	cmd.Flags().BoolVar(&removeRepos, "remove-repos", false, "delete repo directories (not just worktrees)")
-	cmd.Flags().BoolVar(&killSessions, "kill-sessions", false, "kill tracked Claude Code sessions before teardown")
+	cmd.Flags().BoolVar(&removeRepos, "remove-repos", false, "delete repo directories too")
 	return cmd
 }
 
-// listCmd prints repos and agents from the merged config.
 func listCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "List repos and agents defined in the workspace config",
+		Short: "List repos and agents from the workspace config",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := loadConfig()
 			if err != nil {
@@ -242,7 +139,6 @@ func listCmd() *cobra.Command {
 	}
 }
 
-// loadConfig finds and loads the workspace config with any overlay.
 func loadConfig() (*config.WorkspaceConfig, error) {
 	base := configPath
 	if base == "" {

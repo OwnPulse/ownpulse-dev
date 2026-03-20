@@ -21,7 +21,6 @@ var (
 // SetupOptions controls what setup does.
 type SetupOptions struct {
 	Repos      []string // empty = all repos in config
-	Container  bool     // true = Docker mode (default), false = local
 	DryRun     bool
 	AgentsPath string   // resolved absolute path to agent definitions
 }
