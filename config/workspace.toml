@@ -1,45 +1,35 @@
-# OwnPulse base workspace configuration.
-# This file defines the open-source repos and default settings.
-# To extend for hosted/private use, create a workspace.override.toml — see docs.
+# OwnPulse workspace configuration.
+# To extend for hosted/private use, create a workspace.override.toml alongside this file.
 
 [workspace]
 name = "ownpulse"
 default_org = "ownpulse"
 default_branch = "main"
-# Root directory where all repos will be cloned.
 clone_root = "~/dev/ownpulse"
 
 [agents]
-# Path to agent definitions, relative to this file.
-# Agents are symlinked into each repo's .claude/agents/ directory at setup time.
 definitions_path = "../agents"
 
 [[repo]]
 name = "ownpulse"
 description = "Main application — backend, web frontend, iOS"
-org = "ownpulse"
 visibility = "public"
-branch = "main"
 agents = ["rust-backend", "react-frontend", "swift-ios", "code-review", "security-review", "principles-guardian"]
-worktrees = ["backend", "web", "ios"]
 
 [[repo]]
 name = "ownpulse-infra"
 description = "Infrastructure — OpenTofu, Helm charts, Ansible"
 visibility = "private"
 agents = ["k8s-infra", "security-review"]
-worktrees = ["infra"]
 
 [[repo]]
 name = "ownpulse-web"
 description = "Public marketing site — Astro"
 visibility = "public"
 agents = ["react-frontend", "code-review"]
-worktrees = []
 
 [[repo]]
 name = "ownpulse-dev"
 description = "This tool — workspace bootstrapper and agent definitions"
 visibility = "public"
 agents = ["code-review"]
-worktrees = []

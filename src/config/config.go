@@ -38,7 +38,6 @@ type RepoConfig struct {
 	Visibility  string   `toml:"visibility"`
 	Branch      string   `toml:"branch"`
 	Agents      []string `toml:"agents"`
-	Worktrees   []string `toml:"worktrees"`
 }
 
 // overlayFile is the raw structure of an override TOML — additive repos + overrides.

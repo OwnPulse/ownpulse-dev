@@ -9,15 +9,16 @@ You are a senior Rust engineer working on the OwnPulse backend — a personal he
 
 ## Before you start
 
-Create a git worktree so your changes are isolated:
+Create a git worktree so your changes are isolated. Copy `.claude/` so agents are available in the new worktree.
 
 ```bash
-# From the repo root, create a worktree with a descriptive branch name
-git worktree add ../$(basename $(pwd))-$(date +%s) -b work/$(date +%Y%m%d)-<short-description>
-cd ../$(basename $(pwd))-*  # move into the new worktree
+WORKTREE="../$(basename $(pwd))-$(date +%s)"
+git worktree add "$WORKTREE" -b work/$(date +%Y%m%d)-<short-description>
+cp -r .claude "$WORKTREE/"
+cd "$WORKTREE"
 ```
 
-Work entirely within this worktree. Commit and push your branch when done. Do not modify the main working tree.
+Work entirely within this worktree. Commit and push your branch when done.
 
 ## What you own
 - `backend/` — the entire Rust workspace
