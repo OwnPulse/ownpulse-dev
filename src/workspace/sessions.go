@@ -1,6 +1,8 @@
 package workspace
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/fatih/color"
@@ -26,42 +29,96 @@ type Session struct {
 	PID       int       `json:"pid"`
 	Dir       string    `json:"dir"`
 	AgentMode string    `json:"agent_mode"` // "solo" or "teams"
+	Managed   bool      `json:"managed"`    // true = session created this worktree, should clean up
+	Branch    string    `json:"branch"`     // branch created for this session worktree
 	StartedAt time.Time `json:"started_at"`
 }
 
-// SpawnSession launches a Claude Code session for a named repo/worktree.
-func SpawnSession(cfg *config.WorkspaceConfig, repoName, worktree string, teams bool, dryRun bool) error {
-	repo, err := findRepo(cfg.Repos, repoName)
+// SessionOptions holds parameters for spawning a session.
+type SessionOptions struct {
+	RepoName   string
+	Worktree   string
+	Teams      bool
+	DryRun     bool
+	AgentsPath string // resolved absolute path to agent definitions
+}
+
+// SpawnSession creates an isolated git worktree and launches a Claude Code session in it.
+func SpawnSession(cfg *config.WorkspaceConfig, opts SessionOptions) error {
+	repo, err := findRepo(cfg.Repos, opts.RepoName)
 	if err != nil {
 		return err
 	}
 
-	sessionDir := filepath.Join(cfg.Workspace.CloneRoot, repo.Name)
-	sessionName := repo.Name
-	if worktree != "" {
-		sessionDir = filepath.Join(cfg.Workspace.CloneRoot, repo.Name+"-"+worktree)
-		sessionName = repo.Name + "/" + worktree
+	repoDir := filepath.Join(cfg.Workspace.CloneRoot, repo.Name)
+	if !opts.DryRun {
+		if _, err := os.Stat(repoDir); os.IsNotExist(err) {
+			return fmt.Errorf("repo directory %s does not exist — run 'opdev setup' first", repoDir)
+		}
 	}
 
-	if _, err := os.Stat(sessionDir); os.IsNotExist(err) {
-		return fmt.Errorf("directory %s does not exist — run 'opdev setup' first", sessionDir)
+	// Generate a short random session ID.
+	id, err := sessionID()
+	if err != nil {
+		return fmt.Errorf("generating session ID: %w", err)
 	}
 
-	env := os.Environ()
-	if teams {
-		env = append(env, "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1")
-		fmt.Printf("%s Agent teams mode enabled\n", warn("!"))
+	// Build session name and worktree path.
+	var sessionName string
+	var sessionDir string
+	if opts.Worktree != "" {
+		sessionName = fmt.Sprintf("%s/%s-%s", repo.Name, opts.Worktree, id)
+		sessionDir = filepath.Join(cfg.Workspace.CloneRoot, fmt.Sprintf("%s-%s-session-%s", repo.Name, opts.Worktree, id))
+	} else {
+		sessionName = fmt.Sprintf("%s/%s", repo.Name, id)
+		sessionDir = filepath.Join(cfg.Workspace.CloneRoot, fmt.Sprintf("%s-session-%s", repo.Name, id))
 	}
 
-	fmt.Printf("%s Spawning Claude Code session: %s\n", info("→"), sessionName)
+	branchName := fmt.Sprintf("session/%s", id)
+
+	// Determine the start point for the worktree.
+	startPoint := ""
+	if opts.Worktree != "" {
+		// Branch off the named worktree's branch.
+		wtBranch := fmt.Sprintf("worktree/%s", opts.Worktree)
+		if runSilent("git", "-C", repoDir, "show-ref", "--verify", "--quiet", "refs/heads/"+wtBranch) == nil {
+			startPoint = wtBranch
+		}
+	}
+
+	fmt.Printf("%s Creating session worktree: %s\n", info("→"), sessionName)
 	fmt.Printf("    directory: %s\n", sessionDir)
+	fmt.Printf("    branch:    %s\n", branchName)
 
-	if dryRun {
-		fmt.Printf("    %s (dry run — would exec: claude in %s)\n", warn("~"), sessionDir)
+	if !opts.DryRun {
+		args := []string{"-C", repoDir, "worktree", "add", sessionDir, "-b", branchName}
+		if startPoint != "" {
+			args = append(args, startPoint)
+		}
+		if err := run("git", args...); err != nil {
+			return fmt.Errorf("creating session worktree: %w", err)
+		}
+
+		// Link agents into the session worktree.
+		if err := LinkAgents(sessionDir, repo.Agents, opts.AgentsPath, false); err != nil {
+			fmt.Printf("  %s could not link agents: %v\n", warn("!"), err)
+		}
+	} else {
+		fmt.Printf("    %s (dry run — would create worktree and exec claude)\n", warn("~"))
 		return nil
 	}
 
-	// Launch claude in a new terminal tab/window if possible, otherwise foreground.
+	// Build environment.
+	env := os.Environ()
+	for k, v := range cfg.Env {
+		env = append(env, k+"="+v)
+	}
+	if opts.Teams {
+		env = append(env, "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1")
+		fmt.Printf("  %s Agent teams mode enabled\n", warn("!"))
+	}
+
+	// Launch claude.
 	cmd := exec.Command("claude")
 	cmd.Dir = sessionDir
 	cmd.Env = env
@@ -76,10 +133,12 @@ func SpawnSession(cfg *config.WorkspaceConfig, repoName, worktree string, teams 
 	session := Session{
 		Name:      sessionName,
 		RepoName:  repo.Name,
-		Worktree:  worktree,
+		Worktree:  opts.Worktree,
 		PID:       cmd.Process.Pid,
 		Dir:       sessionDir,
-		AgentMode: agentMode(teams),
+		AgentMode: agentMode(opts.Teams),
+		Managed:   true,
+		Branch:    branchName,
 		StartedAt: time.Now(),
 	}
 
@@ -125,6 +184,7 @@ func ListSessions(cfg *config.WorkspaceConfig) error {
 }
 
 // KillSessions stops tracked sessions by name or all if name is empty.
+// Managed session worktrees are removed.
 func KillSessions(cloneRoot, name string) error {
 	state, err := loadSessions(cloneRoot)
 	if err != nil {
@@ -142,21 +202,66 @@ func KillSessions(cloneRoot, name string) error {
 			_ = proc.Kill()
 			fmt.Printf("  %s killed session %s (PID %d)\n", ok("✓"), s.Name, s.PID)
 		}
+		if s.Managed {
+			removeSessionWorktree(cloneRoot, s)
+		}
 	}
 
 	state.Sessions = remaining
 	return persistSessions(cloneRoot, state)
 }
 
-func saveSession(cloneRoot string, s Session) error {
-	state, _ := loadSessions(cloneRoot)
-	// Replace if same name exists.
-	for i, existing := range state.Sessions {
-		if existing.Name == s.Name {
-			state.Sessions[i] = s
-			return persistSessions(cloneRoot, state)
+// CleanupSessions removes stopped sessions and their managed worktrees.
+func CleanupSessions(cloneRoot string, dryRun bool) error {
+	state, err := loadSessions(cloneRoot)
+	if err != nil {
+		return err
+	}
+
+	var alive []Session
+	cleaned := 0
+	for _, s := range state.Sessions {
+		if processAlive(s.PID) {
+			alive = append(alive, s)
+			continue
+		}
+		fmt.Printf("  %s removing dead session %s\n", info("→"), s.Name)
+		if !dryRun && s.Managed {
+			removeSessionWorktree(cloneRoot, s)
+		}
+		cleaned++
+	}
+
+	if cleaned == 0 {
+		fmt.Printf("No dead sessions to clean up.\n")
+		return nil
+	}
+
+	if !dryRun {
+		state.Sessions = alive
+		if err := persistSessions(cloneRoot, state); err != nil {
+			return err
 		}
 	}
+	fmt.Printf("  %s cleaned up %d session(s)\n", ok("✓"), cleaned)
+	return nil
+}
+
+func removeSessionWorktree(cloneRoot string, s Session) {
+	repoDir := filepath.Join(cloneRoot, s.RepoName)
+	if err := runSilent("git", "-C", repoDir, "worktree", "remove", "--force", s.Dir); err != nil {
+		// Worktree remove can fail if dir is already gone; force-remove the directory.
+		_ = os.RemoveAll(s.Dir)
+	}
+	// Clean up the branch.
+	if s.Branch != "" {
+		_ = runSilent("git", "-C", repoDir, "branch", "-D", s.Branch)
+	}
+	fmt.Printf("  %s removed worktree %s\n", ok("✓"), s.Dir)
+}
+
+func saveSession(cloneRoot string, s Session) error {
+	state, _ := loadSessions(cloneRoot)
 	state.Sessions = append(state.Sessions, s)
 	return persistSessions(cloneRoot, state)
 }
@@ -166,10 +271,15 @@ func loadSessions(cloneRoot string) (SessionState, error) {
 	path := sessionsPath(cloneRoot)
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return state, nil // not an error — file may not exist yet
+		if os.IsNotExist(err) {
+			return state, nil
+		}
+		return state, fmt.Errorf("reading sessions file: %w", err)
 	}
-	err = json.Unmarshal(data, &state)
-	return state, err
+	if err := json.Unmarshal(data, &state); err != nil {
+		return state, fmt.Errorf("parsing sessions file %s: %w", path, err)
+	}
+	return state, nil
 }
 
 func persistSessions(cloneRoot string, state SessionState) error {
@@ -194,7 +304,7 @@ func processAlive(pid int) bool {
 		return false
 	}
 	// On Unix, FindProcess always succeeds; send signal 0 to check.
-	err = proc.Signal(os.Signal(nil))
+	err = proc.Signal(syscall.Signal(0))
 	return err == nil
 }
 
@@ -203,6 +313,14 @@ func agentMode(teams bool) string {
 		return "teams"
 	}
 	return "solo"
+}
+
+func sessionID() (string, error) {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func findRepo(repos []config.RepoConfig, name string) (config.RepoConfig, error) {

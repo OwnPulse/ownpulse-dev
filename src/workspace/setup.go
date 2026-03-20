@@ -89,32 +89,39 @@ func setupRepo(cfg *config.WorkspaceConfig, repo config.RepoConfig, opts SetupOp
 		}
 	}
 
-	// Link agent definitions.
-	if err := linkAgents(cfg, repo, opts); err != nil {
+	// Link agent definitions into main repo dir.
+	if err := LinkAgents(repoDir, repo.Agents, opts.AgentsPath, opts.DryRun); err != nil {
 		return fmt.Errorf("linking agents: %w", err)
+	}
+
+	// Link agent definitions into each worktree dir.
+	for _, wt := range repo.Worktrees {
+		wtDir := filepath.Join(cfg.Workspace.CloneRoot, repo.Name+"-"+wt)
+		if err := LinkAgents(wtDir, repo.Agents, opts.AgentsPath, opts.DryRun); err != nil {
+			return fmt.Errorf("linking agents to worktree %s: %w", wt, err)
+		}
 	}
 
 	fmt.Printf("    %s done\n", ok("✓"))
 	return nil
 }
 
-// linkAgents symlinks the relevant agent .md files into the repo's .claude/agents/ dir.
-func linkAgents(cfg *config.WorkspaceConfig, repo config.RepoConfig, opts SetupOptions) error {
-	if len(repo.Agents) == 0 {
+// LinkAgents symlinks agent .md files into targetDir's .claude/agents/ dir.
+func LinkAgents(targetDir string, agentNames []string, agentsPath string, dryRun bool) error {
+	if len(agentNames) == 0 {
 		return nil
 	}
 
-	repoDir := filepath.Join(cfg.Workspace.CloneRoot, repo.Name)
-	agentsDir := filepath.Join(repoDir, ".claude", "agents")
+	agentsDir := filepath.Join(targetDir, ".claude", "agents")
 
-	if !opts.DryRun {
+	if !dryRun {
 		if err := os.MkdirAll(agentsDir, 0755); err != nil {
 			return err
 		}
 	}
 
-	for _, agentName := range repo.Agents {
-		src := filepath.Join(opts.AgentsPath, agentName+".md")
+	for _, agentName := range agentNames {
+		src := filepath.Join(agentsPath, agentName+".md")
 		dst := filepath.Join(agentsDir, agentName+".md")
 
 		if _, err := os.Stat(src); os.IsNotExist(err) {
@@ -122,7 +129,7 @@ func linkAgents(cfg *config.WorkspaceConfig, repo config.RepoConfig, opts SetupO
 			continue
 		}
 
-		if !opts.DryRun {
+		if !dryRun {
 			// Remove existing symlink or file before (re)linking.
 			_ = os.Remove(dst)
 			if err := os.Symlink(src, dst); err != nil {

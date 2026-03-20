@@ -14,7 +14,12 @@ type WorkspaceConfig struct {
 	Agents    AgentsConfig        `toml:"agents"`
 	Env       map[string]string   `toml:"env"`
 	Repos     []RepoConfig        `toml:"repo"`
+
+	configDir string // base dir for resolving relative paths (set during Load)
 }
+
+// ConfigDir returns the directory containing the base config file.
+func (c *WorkspaceConfig) ConfigDir() string { return c.configDir }
 
 type WorkspaceMeta struct {
 	Name          string `toml:"name"`
@@ -52,6 +57,8 @@ func Load(basePath, overlayPath string) (*WorkspaceConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading base config: %w", err)
 	}
+
+	base.configDir = filepath.Dir(basePath)
 
 	// Resolve defaults: repos inherit org and branch from workspace meta if not set.
 	for i := range base.Repos {

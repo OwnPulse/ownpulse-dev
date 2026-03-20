@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -11,6 +12,8 @@ import (
 	"github.com/ownpulse/ownpulse-dev/src/config"
 	"github.com/ownpulse/ownpulse-dev/src/workspace"
 )
+
+var version = "dev"
 
 var (
 	configPath  string
@@ -29,6 +32,7 @@ and manages Claude Code session state.
 
 Configuration is driven by workspace.toml. For hosted/private workspaces,
 create a workspace.override.toml alongside it — see config/workspace.override.toml.example.`,
+		Version: version,
 	}
 
 	root.PersistentFlags().StringVar(&configPath, "config", "", "path to workspace.toml (default: ./config/workspace.toml)")
@@ -39,6 +43,7 @@ create a workspace.override.toml alongside it — see config/workspace.override.
 		setupCmd(),
 		sessionCmd(),
 		statusCmd(),
+		cleanupCmd(),
 		teardownCmd(),
 		listCmd(),
 	)
@@ -85,16 +90,16 @@ func setupCmd() *cobra.Command {
 	return cmd
 }
 
-// sessionCmd spawns a Claude Code session for a repo or worktree.
+// sessionCmd spawns a Claude Code session in an isolated worktree.
 func sessionCmd() *cobra.Command {
 	var worktree string
 	var teams bool
 
 	cmd := &cobra.Command{
 		Use:   "session <repo>",
-		Short: "Spawn a Claude Code session for a repo or worktree",
-		Example: `  opdev session ownpulse                     # session in main repo dir
-  opdev session ownpulse --worktree backend  # session in backend worktree
+		Short: "Spawn a Claude Code session in an isolated worktree",
+		Example: `  opdev session ownpulse                     # session branching from main
+  opdev session ownpulse --worktree backend  # session branching from backend worktree
   opdev session ownpulse --teams             # enable experimental agent teams`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -102,11 +107,23 @@ func sessionCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return workspace.SpawnSession(cfg, args[0], worktree, teams, dryRun)
+
+			agentsPath, err := resolveAgentsPath(cfg)
+			if err != nil {
+				return err
+			}
+
+			return workspace.SpawnSession(cfg, workspace.SessionOptions{
+				RepoName:   args[0],
+				Worktree:   worktree,
+				Teams:      teams,
+				DryRun:     dryRun,
+				AgentsPath: agentsPath,
+			})
 		},
 	}
 
-	cmd.Flags().StringVar(&worktree, "worktree", "", "worktree name to use as the session directory")
+	cmd.Flags().StringVar(&worktree, "worktree", "", "base the session on this worktree branch")
 	cmd.Flags().BoolVar(&teams, "teams", false, "set CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 for this session")
 	return cmd
 }
@@ -122,6 +139,21 @@ func statusCmd() *cobra.Command {
 				return err
 			}
 			return workspace.ListSessions(cfg)
+		},
+	}
+}
+
+// cleanupCmd removes dead session worktrees.
+func cleanupCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "cleanup",
+		Short: "Remove stopped session worktrees and prune session state",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig()
+			if err != nil {
+				return err
+			}
+			return workspace.CleanupSessions(cfg.Workspace.CloneRoot, dryRun)
 		},
 	}
 }
@@ -184,10 +216,10 @@ func listCmd() *cobra.Command {
 				fmt.Printf("  %s  [%s]  %s/%s@%s\n", bold(r.Name), vis, r.Org, r.Name, r.Branch)
 				fmt.Printf("    %s\n", r.Description)
 				if len(r.Agents) > 0 {
-					fmt.Printf("    agents: %s\n", cyan(joinStrings(r.Agents)))
+					fmt.Printf("    agents: %s\n", cyan(strings.Join(r.Agents, ", ")))
 				}
 				if len(r.Worktrees) > 0 {
-					fmt.Printf("    worktrees: %s\n", joinStrings(r.Worktrees))
+					fmt.Printf("    worktrees: %s\n", strings.Join(r.Worktrees, ", "))
 				}
 				fmt.Println()
 			}
@@ -232,23 +264,11 @@ func resolveAgentsPath(cfg *config.WorkspaceConfig) (string, error) {
 	if agentsPath == "" {
 		agentsPath = "./agents"
 	}
-	abs, err := filepath.Abs(agentsPath)
-	if err != nil {
-		return "", fmt.Errorf("resolving agents path: %w", err)
+	if !filepath.IsAbs(agentsPath) {
+		agentsPath = filepath.Join(cfg.ConfigDir(), agentsPath)
 	}
-	if _, err := os.Stat(abs); os.IsNotExist(err) {
-		return "", fmt.Errorf("agents directory not found at %s", abs)
+	if _, err := os.Stat(agentsPath); os.IsNotExist(err) {
+		return "", fmt.Errorf("agents directory not found at %s", agentsPath)
 	}
-	return abs, nil
-}
-
-func joinStrings(ss []string) string {
-	result := ""
-	for i, s := range ss {
-		if i > 0 {
-			result += ", "
-		}
-		result += s
-	}
-	return result
+	return agentsPath, nil
 }
