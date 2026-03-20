@@ -7,91 +7,52 @@ Developer workspace tool for OwnPulse. Bootstraps repos, creates git worktrees, 
 ```bash
 git clone git@github.com:ownpulse/ownpulse-dev.git
 cd ownpulse-dev
-make install    # builds and copies to $GOPATH/bin
-```
 
-Or build locally:
+# Option 1: install to $GOPATH/bin (recommended)
+make install
 
-```bash
-make build      # produces ./opdev
+# Option 2: build locally
+make build    # produces ./opdev
 ```
 
 Requires Go 1.22+, Git, and [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`npm install -g @anthropic-ai/claude-code`).
 
-## Getting started
+### Install from GitHub releases
+
+Download a prebuilt binary from the [releases page](https://github.com/ownpulse/ownpulse-dev/releases):
 
 ```bash
-# Set up the full workspace — clones all repos, creates worktrees, links agents
-opdev setup
-
-# Spawn a Claude Code session (creates an isolated worktree)
-opdev session ownpulse
-
-# Spawn another session for the same repo — they don't conflict
-opdev session ownpulse
-
-# Session branching from a named worktree
-opdev session ownpulse --worktree backend
-
-# See what's running
-opdev status
-
-# Clean up dead sessions and their worktrees
-opdev cleanup
-```
-
-## How sessions work
-
-Every `opdev session` creates a **new git worktree** with a unique branch (`session/<id>`). This means:
-
-- Multiple sessions can run against the same repo in parallel without conflicts.
-- Each session gets its own copy of the working tree, so agents can freely modify files.
-- Agent definitions are automatically symlinked into each session worktree.
-- When a session's Claude Code process exits, `opdev cleanup` removes the worktree and branch.
-
-The session worktree directories are named `<repo>-session-<id>` (or `<repo>-<worktree>-session-<id>` when using `--worktree`).
-
-## Commands
-
-| Command | What it does |
-|---|---|
-| `opdev setup` | Clone repos, create worktrees, link agent definitions |
-| `opdev session <repo>` | Create an isolated worktree and launch Claude Code in it |
-| `opdev status` | Show tracked sessions and whether they're running |
-| `opdev cleanup` | Remove stopped sessions and their worktrees |
-| `opdev list` | List repos and agents from the merged workspace config |
-| `opdev teardown` | Remove worktrees (and optionally repos) |
-
-### Flags
-
-```bash
-# Global
-opdev --config /path/to/workspace.toml <cmd>   # explicit config path
-opdev --overlay /path/to/override.toml <cmd>    # explicit overlay path
-opdev --dry-run <cmd>                           # preview without changes
-
-# setup
-opdev setup --repos ownpulse          # set up one repo only
-opdev setup --local                   # skip Docker, use local toolchain
-
-# session
-opdev session ownpulse --worktree backend   # branch from worktree/backend
-opdev session ownpulse --teams              # enable agent teams mode
-
-# teardown
-opdev teardown --kill-sessions              # kill sessions before tearing down
-opdev teardown --remove-repos               # also delete cloned repo dirs
+# macOS Apple Silicon
+curl -L https://github.com/ownpulse/ownpulse-dev/releases/latest/download/opdev-darwin-arm64 -o opdev
+chmod +x opdev
+mv opdev /usr/local/bin/
 ```
 
 ## Configuration
 
-Config lives in `config/workspace.toml`. For private repos or local overrides, create `config/workspace.override.toml` (gitignored):
+Add this to your `~/.zshrc` (or `~/.bashrc`) so `opdev` finds its config from anywhere:
+
+```bash
+export OPDEV_CONFIG=~/src/ownpulse/ownpulse-dev/config/workspace.toml
+```
+
+Without this, `opdev` looks for the config in these locations (in order):
+
+1. `--config` flag
+2. `OPDEV_CONFIG` environment variable
+3. `~/.config/ownpulse/workspace.toml`
+4. `./config/workspace.toml` (relative to cwd)
+5. `./workspace.toml` (relative to cwd)
+
+### Local overrides
+
+For private repos or local settings, create a `workspace.override.toml` next to the base config:
 
 ```bash
 cp config/workspace.override.toml.example config/workspace.override.toml
 ```
 
-The override file is deep-merged over the base — it can add repos, override repo settings, and set environment variables.
+The override file is deep-merged over the base — it can add repos, override repo settings, and set environment variables. Common use: override `clone_root` to match your local checkout path.
 
 ### Adding a repo
 
@@ -115,7 +76,75 @@ Variables defined in `[env]` are injected into every Claude Code session:
 ```toml
 [env]
 OWNPULSE_ENV = "development"
-MY_API_KEY = "..."
+```
+
+## Getting started
+
+```bash
+# Set up the full workspace — clones all repos, creates worktrees, links agents
+opdev setup
+
+# Launch a cross-repo Claude Code session with all agents
+opdev session
+
+# Launch a session scoped to one repo (creates an isolated worktree)
+opdev session ownpulse
+
+# Session branching from a named worktree
+opdev session ownpulse --worktree backend
+
+# Skip Claude Code permission prompts
+opdev session --dangerously-skip-permissions
+
+# See what's running
+opdev status
+
+# Clean up dead sessions and their worktrees
+opdev cleanup
+```
+
+## How sessions work
+
+**Workspace sessions** (`opdev session` with no repo): launches Claude Code in the workspace root directory (`clone_root`) with all agents from all repos linked. Use this for cross-cutting features that span multiple repos.
+
+**Repo sessions** (`opdev session <repo>`): creates a new git worktree with a unique branch (`session/<id>`) and launches Claude Code in it. This means:
+
+- Multiple sessions can run against the same repo in parallel without conflicts.
+- Each session gets its own copy of the working tree, so agents can freely modify files.
+- Agent definitions are automatically symlinked into each session worktree.
+- When a session's Claude Code process exits, `opdev cleanup` removes the worktree and branch.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `opdev setup` | Clone repos, create worktrees, link agent definitions |
+| `opdev session [repo]` | Launch Claude Code — workspace-wide or in an isolated repo worktree |
+| `opdev status` | Show tracked sessions and whether they're running |
+| `opdev cleanup` | Remove stopped sessions and their worktrees |
+| `opdev list` | List repos and agents from the merged workspace config |
+| `opdev teardown` | Remove worktrees (and optionally repos) |
+
+### Flags
+
+```bash
+# Global
+opdev --config /path/to/workspace.toml <cmd>   # explicit config path
+opdev --overlay /path/to/override.toml <cmd>    # explicit overlay path
+opdev --dry-run <cmd>                           # preview without changes
+
+# setup
+opdev setup --repos ownpulse          # set up one repo only
+opdev setup --local                   # skip Docker, use local toolchain
+
+# session
+opdev session ownpulse --worktree backend           # branch from worktree/backend
+opdev session ownpulse --teams                      # enable agent teams mode
+opdev session --dangerously-skip-permissions         # skip permission prompts
+
+# teardown
+opdev teardown --kill-sessions              # kill sessions before tearing down
+opdev teardown --remove-repos               # also delete cloned repo dirs
 ```
 
 ## Agent definitions

@@ -94,14 +94,17 @@ func setupCmd() *cobra.Command {
 func sessionCmd() *cobra.Command {
 	var worktree string
 	var teams bool
+	var dangerousPerms bool
 
 	cmd := &cobra.Command{
-		Use:   "session <repo>",
+		Use:   "session [repo]",
 		Short: "Spawn a Claude Code session in an isolated worktree",
-		Example: `  opdev session ownpulse                     # session branching from main
+		Example: `  opdev session                              # cross-repo session with all agents
+  opdev session ownpulse                     # session branching from main
   opdev session ownpulse --worktree backend  # session branching from backend worktree
-  opdev session ownpulse --teams             # enable experimental agent teams`,
-		Args: cobra.ExactArgs(1),
+  opdev session ownpulse --teams             # enable experimental agent teams
+  opdev session --dangerously-skip-permissions  # skip Claude Code permission prompts`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := loadConfig()
 			if err != nil {
@@ -113,18 +116,29 @@ func sessionCmd() *cobra.Command {
 				return err
 			}
 
+			if len(args) == 0 {
+				return workspace.SpawnWorkspaceSession(cfg, workspace.SessionOptions{
+					Teams:          teams,
+					DryRun:         dryRun,
+					AgentsPath:     agentsPath,
+					DangerousPerms: dangerousPerms,
+				})
+			}
+
 			return workspace.SpawnSession(cfg, workspace.SessionOptions{
-				RepoName:   args[0],
-				Worktree:   worktree,
-				Teams:      teams,
-				DryRun:     dryRun,
-				AgentsPath: agentsPath,
+				RepoName:       args[0],
+				Worktree:       worktree,
+				Teams:          teams,
+				DryRun:         dryRun,
+				AgentsPath:     agentsPath,
+				DangerousPerms: dangerousPerms,
 			})
 		},
 	}
 
 	cmd.Flags().StringVar(&worktree, "worktree", "", "base the session on this worktree branch")
 	cmd.Flags().BoolVar(&teams, "teams", false, "set CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 for this session")
+	cmd.Flags().BoolVar(&dangerousPerms, "dangerously-skip-permissions", false, "pass --dangerously-skip-permissions to Claude Code")
 	return cmd
 }
 
@@ -232,9 +246,12 @@ func listCmd() *cobra.Command {
 func loadConfig() (*config.WorkspaceConfig, error) {
 	base := configPath
 	if base == "" {
-		// Auto-detect: look for config/workspace.toml relative to binary location,
-		// then relative to cwd.
+		base = os.Getenv("OPDEV_CONFIG")
+	}
+	if base == "" {
+		home, _ := os.UserHomeDir()
 		candidates := []string{
+			filepath.Join(home, ".config", "ownpulse", "workspace.toml"),
 			"config/workspace.toml",
 			"workspace.toml",
 		}
@@ -245,7 +262,7 @@ func loadConfig() (*config.WorkspaceConfig, error) {
 			}
 		}
 		if base == "" {
-			return nil, fmt.Errorf("could not find workspace.toml — use --config to specify its path")
+			return nil, fmt.Errorf("could not find workspace.toml — use --config or set OPDEV_CONFIG")
 		}
 	}
 

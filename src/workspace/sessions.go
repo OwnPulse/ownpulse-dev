@@ -36,11 +36,87 @@ type Session struct {
 
 // SessionOptions holds parameters for spawning a session.
 type SessionOptions struct {
-	RepoName   string
-	Worktree   string
-	Teams      bool
-	DryRun     bool
-	AgentsPath string // resolved absolute path to agent definitions
+	RepoName        string
+	Worktree        string
+	Teams           bool
+	DryRun          bool
+	AgentsPath      string // resolved absolute path to agent definitions
+	DangerousPerms  bool   // pass --dangerously-skip-permissions to claude
+}
+
+// SpawnWorkspaceSession launches a Claude Code session in the workspace root (clone_root)
+// with all agents from all repos linked. Use this for cross-cutting features.
+func SpawnWorkspaceSession(cfg *config.WorkspaceConfig, opts SessionOptions) error {
+	sessionDir := cfg.Workspace.CloneRoot
+
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		return fmt.Errorf("creating workspace dir: %w", err)
+	}
+
+	// Collect all unique agents across all repos.
+	agentSet := make(map[string]bool)
+	for _, repo := range cfg.Repos {
+		for _, a := range repo.Agents {
+			agentSet[a] = true
+		}
+	}
+	var allAgents []string
+	for a := range agentSet {
+		allAgents = append(allAgents, a)
+	}
+
+	fmt.Printf("%s Launching workspace session with %d agents\n", info("→"), len(allAgents))
+	fmt.Printf("    directory: %s\n", sessionDir)
+
+	if !opts.DryRun {
+		if err := LinkAgents(sessionDir, allAgents, opts.AgentsPath, false); err != nil {
+			fmt.Printf("  %s could not link agents: %v\n", warn("!"), err)
+		}
+	} else {
+		for _, a := range allAgents {
+			fmt.Printf("    would link agent: %s\n", a)
+		}
+		fmt.Printf("    %s (dry run — would exec claude in %s)\n", warn("~"), sessionDir)
+		return nil
+	}
+
+	// Build environment.
+	env := os.Environ()
+	for k, v := range cfg.Env {
+		env = append(env, k+"="+v)
+	}
+	if opts.Teams {
+		env = append(env, "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1")
+		fmt.Printf("  %s Agent teams mode enabled\n", warn("!"))
+	}
+
+	cmd := claudeCmd(opts)
+	cmd.Dir = sessionDir
+	cmd.Env = env
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("starting claude: %w — is Claude Code installed?", err)
+	}
+
+	session := Session{
+		Name:      "workspace",
+		RepoName:  "",
+		PID:       cmd.Process.Pid,
+		Dir:       sessionDir,
+		AgentMode: agentMode(opts.Teams),
+		Managed:   false, // workspace dir is not a managed worktree
+		StartedAt: time.Now(),
+	}
+
+	if err := saveSession(cfg.Workspace.CloneRoot, session); err != nil {
+		fmt.Printf("  %s could not save session state: %v\n", warn("!"), err)
+	}
+
+	fmt.Printf("  %s session started (PID %d)\n", ok("✓"), cmd.Process.Pid)
+	return cmd.Wait()
 }
 
 // SpawnSession creates an isolated git worktree and launches a Claude Code session in it.
@@ -119,7 +195,7 @@ func SpawnSession(cfg *config.WorkspaceConfig, opts SessionOptions) error {
 	}
 
 	// Launch claude.
-	cmd := exec.Command("claude")
+	cmd := claudeCmd(opts)
 	cmd.Dir = sessionDir
 	cmd.Env = env
 	cmd.Stdin = os.Stdin
@@ -147,7 +223,9 @@ func SpawnSession(cfg *config.WorkspaceConfig, opts SessionOptions) error {
 	}
 
 	fmt.Printf("  %s session started (PID %d)\n", ok("✓"), cmd.Process.Pid)
-	return nil
+
+	// Wait for claude to exit — it needs the foreground TTY.
+	return cmd.Wait()
 }
 
 // ListSessions prints all tracked sessions and whether their processes are still running.
@@ -313,6 +391,14 @@ func agentMode(teams bool) string {
 		return "teams"
 	}
 	return "solo"
+}
+
+func claudeCmd(opts SessionOptions) *exec.Cmd {
+	var args []string
+	if opts.DangerousPerms {
+		args = append(args, "--dangerously-skip-permissions")
+	}
+	return exec.Command("claude", args...)
 }
 
 func sessionID() (string, error) {
