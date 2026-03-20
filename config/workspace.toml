@@ -14,48 +14,32 @@ clone_root = "~/dev/ownpulse"
 # Agents are symlinked into each repo's .claude/agents/ directory at setup time.
 definitions_path = "../agents"
 
-[tasks]
-# Task state directory (plans, locks, done files, reviews).
-# Relative to clone_root. Default: .ownpulse-dev
-state_dir = ".ownpulse-dev"
-
-[env]
-# Environment variables set for all sessions.
-# Values starting with $ are read from the host environment.
-OWNPULSE_ENV = "development"
-
-# Secret references — values are never stored here.
-# Run `op dev secrets` to populate from 1Password, or set manually.
-# Format: ENV_VAR = { source = "env" } means read from host env at runtime.
-# Format: ENV_VAR = { source = "op", vault = "OwnPulse", item = "Dev Secrets", field = "name" }
-# (1Password source support is a future extension point — scaffold is here)
-
 [[repo]]
 name = "ownpulse"
 description = "Main application — backend, web frontend, iOS"
-org = "ownpulse"                   # inherits default_org if omitted
+org = "ownpulse"
 visibility = "public"
 branch = "main"
-agents = ["rust-backend", "react-frontend", "swift-ios", "code-review", "security-review", "principles-guardian", "session-launcher", "task-runner"]
+agents = ["rust-backend", "react-frontend", "swift-ios", "code-review", "security-review", "principles-guardian"]
 worktrees = ["backend", "web", "ios"]
 
 [[repo]]
 name = "ownpulse-infra"
 description = "Infrastructure — OpenTofu, Helm charts, Ansible"
 visibility = "private"
-agents = ["k8s-infra", "security-review", "session-launcher", "task-runner"]
+agents = ["k8s-infra", "security-review"]
 worktrees = ["infra"]
 
 [[repo]]
 name = "ownpulse-web"
 description = "Public marketing site — Astro"
 visibility = "public"
-agents = ["react-frontend", "code-review", "session-launcher", "task-runner"]
+agents = ["react-frontend", "code-review"]
 worktrees = []
 
 [[repo]]
 name = "ownpulse-dev"
 description = "This tool — workspace bootstrapper and agent definitions"
 visibility = "public"
-agents = ["code-review", "session-launcher", "task-runner"]
+agents = ["code-review"]
 worktrees = []

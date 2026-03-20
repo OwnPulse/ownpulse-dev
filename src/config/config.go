@@ -12,8 +12,6 @@ import (
 type WorkspaceConfig struct {
 	Workspace WorkspaceMeta       `toml:"workspace"`
 	Agents    AgentsConfig        `toml:"agents"`
-	Tasks     TasksConfig         `toml:"tasks"`
-	Env       map[string]string   `toml:"env"`
 	Repos     []RepoConfig        `toml:"repo"`
 
 	configDir string // base dir for resolving relative paths (set during Load)
@@ -33,10 +31,6 @@ type AgentsConfig struct {
 	DefinitionsPath string `toml:"definitions_path"`
 }
 
-type TasksConfig struct {
-	StateDir string `toml:"state_dir"`
-}
-
 type RepoConfig struct {
 	Name        string   `toml:"name"`
 	Description string   `toml:"description"`
@@ -49,10 +43,9 @@ type RepoConfig struct {
 
 // overlayFile is the raw structure of an override TOML — additive repos + overrides.
 type overlayFile struct {
-	Workspace     WorkspaceMeta     `toml:"workspace"`
-	Env           map[string]string `toml:"env"`
-	Repos         []RepoConfig      `toml:"repo"`
-	RepoOverrides []RepoConfig      `toml:"repo_override"`
+	Workspace     WorkspaceMeta `toml:"workspace"`
+	Repos         []RepoConfig  `toml:"repo"`
+	RepoOverrides []RepoConfig  `toml:"repo_override"`
 }
 
 // Load reads the base workspace.toml and, if present, merges an override file on top.
@@ -125,14 +118,6 @@ func applyOverlay(base *WorkspaceConfig, path string) error {
 	}
 	if overlay.Workspace.CloneRoot != "" {
 		base.Workspace.CloneRoot = expandHome(overlay.Workspace.CloneRoot)
-	}
-
-	// Merge env — overlay keys win.
-	if base.Env == nil {
-		base.Env = make(map[string]string)
-	}
-	for k, v := range overlay.Env {
-		base.Env[k] = v
 	}
 
 	// Append additional repos from overlay.
