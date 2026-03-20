@@ -4,13 +4,21 @@ BINARY := opdev
 SRC := ./src
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-X main.version=$(VERSION)"
+PLATFORM ?= $(shell uname -s | tr A-Z a-z)/$(shell uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
+
+# Build using Docker if go is not on PATH.
+HAS_GO := $(shell command -v go 2>/dev/null)
 
 build:
+ifdef HAS_GO
 	go build $(LDFLAGS) -o $(BINARY) $(SRC)
+else
+	DOCKER_BUILDKIT=1 docker build --platform $(PLATFORM) --build-arg VERSION=$(VERSION) --output type=local,dest=. --target export .
+endif
 
 install: build
-	mv $(BINARY) $(shell go env GOPATH)/bin/$(BINARY)
-	@echo "installed to $(shell go env GOPATH)/bin/$(BINARY)"
+	sudo install $(BINARY) /usr/local/bin/$(BINARY)
+	@echo "installed to /usr/local/bin/$(BINARY)"
 
 test:
 	go test ./...
