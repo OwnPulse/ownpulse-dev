@@ -138,9 +138,12 @@ func TestGenerateCLAUDEmd(t *testing.T) {
 		"- **infra** — Infrastructure",
 		"- rust-backend",
 		"- react-frontend",
+		"gh-actions",
+		"CI/CD",
 		"## Worktree policy",
 		"## Agent teams",
 		"## Default workflow",
+		"define the API contract",
 		"Security: injection, auth bypass",
 		"no over-engineering",
 	} {

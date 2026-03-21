@@ -26,10 +26,16 @@ agents = ["k8s-infra", "security-review"]
 name = "ownpulse-web"
 description = "Public marketing site — Astro"
 visibility = "public"
-agents = ["react-frontend", "code-review"]
+agents = ["astro-web", "code-review"]
 
 [[repo]]
 name = "ownpulse-dev"
 description = "This tool — workspace bootstrapper and agent definitions"
+visibility = "public"
+agents = ["code-review"]
+
+[[repo]]
+name = "gh-actions"
+description = "Shared GitHub Actions — reusable composite actions for CI/CD"
 visibility = "public"
 agents = ["code-review"]
