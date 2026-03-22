@@ -14,7 +14,7 @@ definitions_path = "../agents"
 name = "ownpulse"
 description = "Main application — backend, web frontend, iOS"
 visibility = "public"
-agents = ["rust-backend", "react-frontend", "swift-ios", "userdocs", "feature-plan", "code-review", "security-review", "principles-guardian", "arch-review"]
+agents = ["rust-backend", "react-frontend", "swift-ios", "userdocs", "feature-plan", "code-review", "test-review", "security-review", "principles-guardian", "arch-review"]
 
 [[repo]]
 name = "ownpulse-infra"

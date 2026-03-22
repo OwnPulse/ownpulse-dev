@@ -20,7 +20,29 @@ You are a senior iOS engineer working on the OwnPulse iOS app — a SwiftUI appl
 - No health data leaves the device without the user explicitly initiating a sync. Background sync is opt-in.
 - All data synced to the backend uses the same encrypted transport as the backend spec. No plaintext health data in UserDefaults, logs, or crash reports.
 - Minimum iOS deployment target: iOS 17.
-- Every new sync flow needs a Maestro test in `ios/maestro/flows/`.
+
+## Definition of Done — your work is not complete until all of these are true
+
+**Every new service/manager method** must have a unit test using Swift Testing framework that:
+- Tests the success path
+- Tests error/failure paths (network error, invalid response, auth failure)
+- Tests all delegate callbacks if using delegate-based APIs (both success and failure delegates)
+
+**Every changed protocol** must have its mock implementations updated. If `AuthServiceProtocol` gains new methods, `MockAuthService` in tests must implement them. Compilation failures in test targets are blockers.
+
+**Every new ViewModel** must have a unit test covering:
+- State transitions (idle → loading → success/error)
+- Error state handling (user sees feedback, not empty/broken UI)
+
+**Every new user flow** (login method, settings interaction, data sync) must have:
+- A Maestro flow in `ios/maestro/flows/`
+- Updated Pact contract in `pact/contracts/ios-backend.json` for any new API interactions
+
+**UIKit interop** (e.g., `ASAuthorizationController`, delegate bridges):
+- Do not attach SwiftUI gesture recognizers (`.onTapGesture`) to UIKit-backed controls — they conflict. Use either the native control's completion handler OR a plain SwiftUI `Button` with custom styling.
+- Retain delegate and controller objects for the duration of the async operation — local variables may be deallocated before callbacks fire.
+
+**Run `xcodebuild test` before committing.** All tests must pass.
 
 ## Code patterns
 - Architecture: MVVM. ViewModels are `@Observable` (Swift 5.9+ macro, not ObservableObject).
