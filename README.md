@@ -4,9 +4,7 @@ Workspace bootstrapper and Claude Code agent definitions for OwnPulse.
 
 ## What this does
 
-`opdev` clones the OwnPulse repos and symlinks Claude Code agent definitions into each one. After that, you just `cd` into a repo and run `claude` — the right agents are already available.
-
-Agents that modify code create their own git worktrees automatically, so you can run multiple Claude Code sessions in parallel against the same repo without conflicts.
+`opdev` clones the OwnPulse repos, symlinks Claude Code agent definitions into each one, and provides session isolation so you can run multiple Claude Code sessions in parallel without conflicts.
 
 ## Quick start
 
@@ -33,34 +31,50 @@ opdev setup
 ## Development workflow
 
 ```bash
-# Start a session — cd into any repo, run claude
+# Start an isolated session — creates a worktree and launches Claude Code
 cd ~/src/ownpulse/ownpulse
-claude
+opdev session backend-auth
 
-# Invoke an agent (e.g., rust-backend) — it creates a git worktree,
-# copies .claude/ into it, and works there in isolation.
-
-# Open another terminal for parallel work
+# In another terminal — parallel session, separate worktree, no conflicts
 cd ~/src/ownpulse/ownpulse
-claude
-# Invoke another agent — separate worktree, no conflicts.
+opdev session frontend-auth
 
-# When done, the agent commits on its branch and you can PR it.
+# Infra work (different repo)
+cd ~/src/ownpulse/ownpulse-infra
+opdev session helm-auth
+
+# When done, clean up stale worktrees
+opdev clean --repo ownpulse
 ```
 
-Each write agent creates a worktree like `ownpulse-1742531200/` next to the main repo. Multiple agents can work on the same repo simultaneously because each gets its own working tree and branch.
+Each `opdev session` creates a git worktree at `worktrees/<repo>-<name>` with branch `work/<name>`, then launches `claude --dangerously-skip-permissions` in it. Multiple sessions can work on the same repo simultaneously because each gets its own working tree and branch.
+
+Within each session, the lead Claude instance can spawn subagents with `isolation: "worktree"` for further isolation — for example, a backend agent and frontend agent working in parallel on a cross-cutting feature.
 
 Read-only agents (code-review, security-review, principles-guardian) work directly in the repo — no worktree needed.
 
 ## Commands
 
 ```bash
-opdev setup                   # clone all repos, link agents
-opdev setup --repos ownpulse  # set up one repo
-opdev setup --dry-run         # preview without making changes
-opdev list                    # show repos and their agents
-opdev teardown                # prune orphan worktrees
-opdev teardown --remove-repos # delete repo directories too
+# Workspace setup
+opdev setup                          # clone all repos, link agents, generate CLAUDE.md
+opdev setup --repos ownpulse         # set up one repo
+opdev setup --dry-run                # preview without making changes
+opdev list                           # show repos and their agents
+
+# Sessions
+opdev session backend-auth           # create worktree + launch claude
+opdev session --repo ownpulse foo    # explicit repo (default: detect from cwd)
+opdev session                        # random session name
+opdev session --safe backend-auth    # launch without --dangerously-skip-permissions
+opdev session --no-launch foo        # create worktree only, don't launch claude
+opdev session --dry-run foo          # preview what would happen
+
+# Cleanup
+opdev clean                          # prune stale worktrees (detect repo from cwd)
+opdev clean --repo ownpulse          # prune for a specific repo
+opdev teardown                       # prune orphan worktrees across all repos
+opdev teardown --remove-repos        # delete repo directories too
 ```
 
 ## Repos
@@ -69,21 +83,22 @@ opdev teardown --remove-repos # delete repo directories too
 |---|---|---|
 | `ownpulse` | Backend, web frontend, iOS app | rust-backend, react-frontend, swift-ios, code-review, security-review, principles-guardian |
 | `ownpulse-infra` | OpenTofu, Helm, Ansible | k8s-infra, security-review |
-| `ownpulse-web` | Public marketing site (Astro) | react-frontend, code-review |
+| `ownpulse-web` | Public marketing site (Astro) | astro-web, code-review |
 | `ownpulse-dev` | This tool and agent definitions | code-review |
 
 ## Agents
 
 Agents live in `agents/`. Each `.md` file is a Claude Code agent definition — symlinked into `.claude/agents/` in each repo during setup.
 
-**Write agents** — create worktrees for isolation:
+**Write agents** — spawned with `isolation: "worktree"` by the lead session:
 
 | Agent | Scope |
 |---|---|
 | `rust-backend` | `backend/` — Axum, sqlx, tokio, migrations, Pact contracts |
-| `react-frontend` | `web/` — React, Vite, TypeScript, Playwright, and the Astro public site |
+| `react-frontend` | `web/` — React, Vite, TypeScript, Playwright |
 | `swift-ios` | `ios/` — SwiftUI, HealthKit, Maestro flows |
 | `k8s-infra` | Helm charts, OpenTofu, GitHub Actions, Ansible |
+| `astro-web` | Public marketing site (Astro) |
 
 **Read-only agents** — review without modifying files:
 
@@ -95,22 +110,24 @@ Agents live in `agents/`. Each `.md` file is a Claude Code agent definition — 
 
 ### Adding an agent
 
-1. Create `agents/<name>.md` with frontmatter (`name`, `description`, `tools`, `model`)
+1. Create `agents/<name>.md` with frontmatter (`name`, `description`, `tools`)
 2. Add it to the repo's `agents` list in `config/workspace.toml`
 3. Run `opdev setup`
 
-### How agent worktrees work
+### How isolation works
 
-When a write agent starts, it runs:
+**Session isolation:** `opdev session` creates a git worktree per top-level Claude Code session. This means you can run 3-5 sessions simultaneously against the same repo — each has its own working tree and branch.
 
-```bash
-WORKTREE="../$(basename $(pwd))-$(date +%s)"
-git worktree add "$WORKTREE" -b work/$(date +%Y%m%d)-<description>
-cp -r .claude "$WORKTREE/"
-cd "$WORKTREE"
+**Subagent isolation:** Within a session, the lead Claude instance spawns write agents with `isolation: "worktree"`. Claude Code handles worktree creation and cleanup automatically — agents do not manage worktrees themselves.
+
 ```
-
-This gives it an isolated copy of the repo on its own branch, with all agent definitions available. The main working tree stays clean.
+repo (main checkout — stays clean)
+├── worktrees/
+│   ├── repo-backend-auth/      ← opdev session backend-auth
+│   │   └── (claude spawns subagents with isolation: "worktree")
+│   ├── repo-frontend-auth/     ← opdev session frontend-auth
+│   └── repo-helm-fix/          ← opdev session helm-fix
+```
 
 ## Configuration
 
@@ -126,6 +143,16 @@ cp config/workspace.override.toml.example config/workspace.override.toml
 ```
 
 **Config lookup order:** `--config` flag → `OPDEV_CONFIG` env var → `~/.config/ownpulse/workspace.toml` → `./config/workspace.toml` → `./workspace.toml`
+
+## Generated files
+
+`opdev setup` generates `.claude/CLAUDE.md` in each repo. This file contains:
+- **Hard rules** (IaC only, no telemetry, secrets in SOPS, etc.) — loaded by every Claude session
+- Repo list and CI/CD conventions
+- Agent inventory (categorized as write/review)
+- Agent team workflow instructions
+
+The template lives in `src/workspace/setup.go` — edit there and re-run `opdev setup`.
 
 ## Prerequisites
 

@@ -43,6 +43,8 @@ create a workspace.override.toml alongside it.`,
 		setupCmd(),
 		teardownCmd(),
 		listCmd(),
+		sessionCmd(),
+		cleanCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -167,6 +169,72 @@ func loadConfig() (*config.WorkspaceConfig, error) {
 	}
 
 	return config.Load(base, overlay)
+}
+
+func sessionCmd() *cobra.Command {
+	var repo string
+	var noLaunch bool
+	var dangerousPermissions bool
+
+	cmd := &cobra.Command{
+		Use:   "session [name]",
+		Short: "Create an isolated worktree and launch Claude Code",
+		Long: `Creates a git worktree for an isolated Claude Code session.
+
+Each session gets its own working copy so multiple sessions can run
+in parallel without stomping on each other. Claude Code is launched
+with --dangerously-skip-permissions by default.
+
+If no name is given, a random ID is used.`,
+		Example: `  opdev session backend-auth
+  opdev session --repo ownpulse backend-auth
+  opdev session --no-launch backend-auth
+  opdev session --safe backend-auth`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig()
+			if err != nil {
+				return err
+			}
+
+			name := ""
+			if len(args) > 0 {
+				name = args[0]
+			}
+
+			return workspace.Session(cfg, workspace.SessionOptions{
+				RepoName:        repo,
+				Name:            name,
+				DryRun:          dryRun,
+				NoLaunch:        noLaunch,
+				SkipPermissions: !dangerousPermissions,
+			})
+		},
+	}
+
+	cmd.Flags().StringVar(&repo, "repo", "", "repo name (default: detect from cwd)")
+	cmd.Flags().BoolVar(&noLaunch, "no-launch", false, "create worktree but don't launch claude")
+	cmd.Flags().BoolVar(&dangerousPermissions, "safe", false, "launch claude without --dangerously-skip-permissions")
+	return cmd
+}
+
+func cleanCmd() *cobra.Command {
+	var repo string
+
+	cmd := &cobra.Command{
+		Use:   "clean",
+		Short: "Prune stale worktrees",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig()
+			if err != nil {
+				return err
+			}
+			return workspace.CleanSessions(cfg, repo, dryRun)
+		},
+	}
+
+	cmd.Flags().StringVar(&repo, "repo", "", "repo name (default: detect from cwd)")
+	return cmd
 }
 
 func resolveAgentsPath(cfg *config.WorkspaceConfig) (string, error) {
