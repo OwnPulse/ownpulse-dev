@@ -105,11 +105,28 @@ func TestGenerateSettings_DryRun(t *testing.T) {
 	}
 }
 
+// testAgentsDir creates a temporary directory with agent .md files and returns its path.
+func testAgentsDir(t *testing.T, agents ...string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "agents")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range agents {
+		if err := os.WriteFile(filepath.Join(dir, name+".md"), []byte("# "+name), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
 func TestGenerateCLAUDEmd(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0755); err != nil {
 		t.Fatal(err)
 	}
+
+	agentsDir := testAgentsDir(t, "rust-backend", "react-frontend", "code-review", "arch-review")
 
 	cfg := &config.WorkspaceConfig{
 		Repos: []config.RepoConfig{
@@ -122,7 +139,7 @@ func TestGenerateCLAUDEmd(t *testing.T) {
 		Agents: []string{"rust-backend", "react-frontend"},
 	}
 
-	if err := generateCLAUDEmd(cfg, repo, dir, false); err != nil {
+	if err := generateCLAUDEmd(cfg, repo, dir, agentsDir, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -161,6 +178,8 @@ func TestGenerateCLAUDEmd_CategoriesAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	agentsDir := testAgentsDir(t, "rust-backend", "code-review", "security-review")
+
 	cfg := &config.WorkspaceConfig{
 		Repos: []config.RepoConfig{
 			{Name: "app", Description: "Main app"},
@@ -171,7 +190,7 @@ func TestGenerateCLAUDEmd_CategoriesAgents(t *testing.T) {
 		Agents: []string{"rust-backend", "code-review", "security-review"},
 	}
 
-	if err := generateCLAUDEmd(cfg, repo, dir, false); err != nil {
+	if err := generateCLAUDEmd(cfg, repo, dir, agentsDir, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -201,12 +220,14 @@ func TestGenerateCLAUDEmd_Overwrites(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	agentsDir := testAgentsDir(t)
+
 	cfg := &config.WorkspaceConfig{
 		Repos: []config.RepoConfig{{Name: "app", Description: "Main app"}},
 	}
 	repo := config.RepoConfig{Name: "app"}
 
-	if err := generateCLAUDEmd(cfg, repo, dir, false); err != nil {
+	if err := generateCLAUDEmd(cfg, repo, dir, agentsDir, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -228,10 +249,12 @@ func TestGenerateCLAUDEmd_DryRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	agentsDir := testAgentsDir(t)
+
 	cfg := &config.WorkspaceConfig{}
 	repo := config.RepoConfig{Name: "app"}
 
-	if err := generateCLAUDEmd(cfg, repo, dir, true); err != nil {
+	if err := generateCLAUDEmd(cfg, repo, dir, agentsDir, true); err != nil {
 		t.Fatal(err)
 	}
 

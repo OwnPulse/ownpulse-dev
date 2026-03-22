@@ -36,10 +36,23 @@
 Prefer shared actions from `OwnPulse/gh-actions` over inline workflow steps.
 Reference as: `uses: OwnPulse/gh-actions/<action-name>@v1`
 
-## Agents in this repo
+## Agents
+
+**Write agents** (spawn with `isolation: "worktree"`):
+- astro-web
+- k8s-infra
+- react-frontend
+- rust-backend
+- swift-ios
+- userdocs
 
 **Review agents** (read-only, no worktree needed):
+- arch-review
 - code-review
+- feature-plan
+- principles-guardian
+- security-review
+- test-review
 
 ## Agent Teams
 

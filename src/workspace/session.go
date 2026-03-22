@@ -88,6 +88,12 @@ func Session(cfg *config.WorkspaceConfig, opts SessionOptions) error {
 
 	fmt.Printf("  %s launching claude\n\n", info("→"))
 
+	// Change into the worktree before exec — syscall.Exec inherits the kernel
+	// working directory, so setting PWD alone is not enough.
+	if err := os.Chdir(worktreeDir); err != nil {
+		return fmt.Errorf("chdir to worktree: %w", err)
+	}
+
 	// Replace this process with claude.
 	return syscall.Exec(claudePath, args, appendEnv(os.Environ(), "PWD="+worktreeDir))
 }
