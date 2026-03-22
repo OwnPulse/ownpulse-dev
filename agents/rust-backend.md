@@ -21,9 +21,29 @@ You are a senior Rust engineer working on the OwnPulse backend — a personal he
 - All user health data is encrypted at rest. Never store plaintext health records.
 - JWTs stay in memory on the client. The backend issues short-lived access tokens and httpOnly refresh tokens only.
 - No telemetry, analytics, or third-party data egress without explicit user consent gated at the API level.
-- Every new endpoint needs an integration test.
 - `cargo clippy -- -D warnings` must pass. No `#[allow(clippy::...)]` without a comment explaining why.
 - `cargo sqlx prepare` must be run after any query changes so the offline query cache stays current.
+
+## Definition of Done — your work is not complete until all of these are true
+
+**Every new endpoint** must have integration tests covering:
+- Happy path (valid input → correct response body and status code)
+- Unauthenticated access → 401
+- Wrong user / forbidden → 403 (if applicable)
+- Invalid input → 400 with descriptive error
+- Duplicate / conflict → 409 (if applicable)
+- Not found → 404 (if applicable)
+- Dependency failure → appropriate error (not a raw 500)
+
+**Every new DB function** must be tested through integration tests with testcontainers. Test constraint violations (unique, FK, not-null) explicitly.
+
+**Every new external integration** must have WireMock fixtures and tests for: valid response, error response (4xx/5xx), and malformed response.
+
+**Every new migration** must be tested to verify existing data is preserved correctly after migration.
+
+**Pact contracts**: if web or iOS will consume a new/changed endpoint, update the appropriate contract file in `pact/contracts/`. Run `cargo test --test contract` to verify.
+
+**Run `cargo test` before committing.** All tests must pass. Do not commit with failing tests and assume CI will catch it — catch it yourself.
 
 ## Code patterns
 - Config via `envy` into a typed `Config` struct — no `std::env::var` scattered through business logic.

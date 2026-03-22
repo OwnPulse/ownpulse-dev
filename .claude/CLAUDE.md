@@ -14,10 +14,11 @@
 6. **Self-hosting must work.** Every feature must work with `helm upgrade --install`
    and Postgres. No required cloud services.
 7. **Do not modify files outside your assigned area** without flagging it.
-8. **Review before committing.** Run code-review and security-review agents on
-   all changes before committing. Run principles-guardian on any change that
-   touches data collection, export, sharing, or external integrations. Run
-   arch-review on plans before starting implementation.
+8. **Review before committing.** Run code-review, test-review, and security-review
+   agents on all changes before committing. Run principles-guardian on any change
+   that touches data collection, export, sharing, or external integrations. Run
+   arch-review on plans before starting implementation. test-review is mandatory
+   on every PR — no exceptions.
 9. **Update docs with every feature.** If a change affects user-visible behavior,
    update `userdocs/` (user-facing docs) and/or `docs/` (developer docs) in the
    same PR. New API endpoints need `docs/architecture/api.md` updates. New user
@@ -61,9 +62,12 @@ changes. **Do it directly** for single-file fixes and quick questions.
    endpoints. Update `docs/guides/self-hosting.md` for new env vars or services.
 5. **Before committing**, run review agents on the results:
    - code-review — always
+   - test-review — always (this is the test coverage gate — missing tests block merge)
    - security-review — always for auth, crypto, API, or data changes
    - principles-guardian — for data collection, export, sharing, integrations
-6. Fix issues or ask agents to revise. Only commit after reviews pass.
+6. Fix issues flagged by reviewers. **All must-fix items from test-review must be
+   resolved before committing** — test gaps are never deferred. Ask write agents
+   to add missing tests, then re-run test-review to confirm.
 
 Keep implementations minimal. Prefer fewer files, less indirection, and no
 speculative features. If three lines work, don't write a helper.

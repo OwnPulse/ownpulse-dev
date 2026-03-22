@@ -205,10 +205,11 @@ func generateCLAUDEmd(cfg *config.WorkspaceConfig, repo config.RepoConfig, repoD
 	b.WriteString("6. **Self-hosting must work.** Every feature must work with `helm upgrade --install`\n")
 	b.WriteString("   and Postgres. No required cloud services.\n")
 	b.WriteString("7. **Do not modify files outside your assigned area** without flagging it.\n")
-	b.WriteString("8. **Review before committing.** Run code-review and security-review agents on\n")
-	b.WriteString("   all changes before committing. Run principles-guardian on any change that\n")
-	b.WriteString("   touches data collection, export, sharing, or external integrations. Run\n")
-	b.WriteString("   arch-review on plans before starting implementation.\n")
+	b.WriteString("8. **Review before committing.** Run code-review, test-review, and security-review\n")
+	b.WriteString("   agents on all changes before committing. Run principles-guardian on any change\n")
+	b.WriteString("   that touches data collection, export, sharing, or external integrations. Run\n")
+	b.WriteString("   arch-review on plans before starting implementation. test-review is mandatory\n")
+	b.WriteString("   on every PR — no exceptions.\n")
 	b.WriteString("9. **Update docs with every feature.** If a change affects user-visible behavior,\n")
 	b.WriteString("   update `userdocs/` (user-facing docs) and/or `docs/` (developer docs) in the\n")
 	b.WriteString("   same PR. New API endpoints need `docs/architecture/api.md` updates. New user\n")
@@ -231,6 +232,7 @@ func generateCLAUDEmd(cfg *config.WorkspaceConfig, repo config.RepoConfig, repoD
 	reviewAgents := []string{}
 	reviewSet := map[string]bool{
 		"code-review":        true,
+		"test-review":        true,
 		"security-review":    true,
 		"principles-guardian": true,
 		"arch-review":        true,
@@ -277,9 +279,12 @@ func generateCLAUDEmd(cfg *config.WorkspaceConfig, repo config.RepoConfig, repoD
 	b.WriteString("   endpoints. Update `docs/guides/self-hosting.md` for new env vars or services.\n")
 	b.WriteString("5. **Before committing**, run review agents on the results:\n")
 	b.WriteString("   - code-review — always\n")
+	b.WriteString("   - test-review — always (this is the test coverage gate — missing tests block merge)\n")
 	b.WriteString("   - security-review — always for auth, crypto, API, or data changes\n")
 	b.WriteString("   - principles-guardian — for data collection, export, sharing, integrations\n")
-	b.WriteString("6. Fix issues or ask agents to revise. Only commit after reviews pass.\n\n")
+	b.WriteString("6. Fix issues flagged by reviewers. **All must-fix items from test-review must be\n")
+	b.WriteString("   resolved before committing** — test gaps are never deferred. Ask write agents\n")
+	b.WriteString("   to add missing tests, then re-run test-review to confirm.\n\n")
 
 	b.WriteString("Keep implementations minimal. Prefer fewer files, less indirection, and no\n")
 	b.WriteString("speculative features. If three lines work, don't write a helper.\n")
