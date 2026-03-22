@@ -83,6 +83,8 @@ func Session(cfg *config.WorkspaceConfig, opts SessionOptions) error {
 	if opts.SkipPermissions {
 		args = append(args, "--dangerously-skip-permissions")
 	}
+	sessionName := fmt.Sprintf("%s/%s", repoName, name)
+	args = append(args, "--name", sessionName)
 
 	fmt.Printf("  %s launching claude\n\n", info("→"))
 
