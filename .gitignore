@@ -2,3 +2,6 @@ opdev
 dist/
 config/workspace.override.toml
 .ownpulse-dev/
+
+# Agent symlinks (machine-local, recreated by opdev setup)
+.claude/agents/

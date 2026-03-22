@@ -1,7 +1,7 @@
 # ADR-0001: tmux for Parallel Claude Code Session Management
 
 **Date:** 2026-03-19
-**Status:** Accepted
+**Status:** Superseded by ADR-0003 (exec-based sessions)
 **Deciders:** Tony Ferrell
 
 ---

@@ -140,16 +140,52 @@ func TestGenerateCLAUDEmd(t *testing.T) {
 		"- react-frontend",
 		"gh-actions",
 		"CI/CD",
-		"## Worktree policy",
-		"## Agent teams",
-		"## Default workflow",
+		"## Hard Rules",
+		"Everything is IaC",
+		"Review before committing",
+		"## Agent Teams",
+		"### Workflow",
+		"arch-review",
+		"isolation: \"worktree\"",
 		"define the API contract",
-		"Security: injection, auth bypass",
-		"no over-engineering",
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("missing %q in CLAUDE.md", want)
 		}
+	}
+}
+
+func TestGenerateCLAUDEmd_CategoriesAgents(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.WorkspaceConfig{
+		Repos: []config.RepoConfig{
+			{Name: "app", Description: "Main app"},
+		},
+	}
+	repo := config.RepoConfig{
+		Name:   "app",
+		Agents: []string{"rust-backend", "code-review", "security-review"},
+	}
+
+	if err := generateCLAUDEmd(cfg, repo, dir, false); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".claude", "CLAUDE.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "**Write agents**") {
+		t.Error("missing write agents section")
+	}
+	if !strings.Contains(content, "**Review agents**") {
+		t.Error("missing review agents section")
 	}
 }
 
