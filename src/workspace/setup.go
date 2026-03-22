@@ -66,8 +66,8 @@ func setupRepo(cfg *config.WorkspaceConfig, repo config.RepoConfig, opts SetupOp
 		fmt.Printf("    %s already cloned\n", warn("~"))
 	}
 
-	// Link agent definitions.
-	if err := LinkAgents(repoDir, repo.Agents, opts.AgentsPath, opts.DryRun); err != nil {
+	// Link agent definitions — all agents go to every repo.
+	if err := LinkAgents(repoDir, opts.AgentsPath, opts.DryRun); err != nil {
 		return fmt.Errorf("linking agents: %w", err)
 	}
 
@@ -77,7 +77,7 @@ func setupRepo(cfg *config.WorkspaceConfig, repo config.RepoConfig, opts SetupOp
 	}
 
 	// Generate .claude/CLAUDE.md (workspace context).
-	if err := generateCLAUDEmd(cfg, repo, repoDir, opts.DryRun); err != nil {
+	if err := generateCLAUDEmd(cfg, repo, repoDir, opts.AgentsPath, opts.DryRun); err != nil {
 		fmt.Printf("    %s could not generate CLAUDE.md: %v\n", warn("!"), err)
 	}
 
@@ -85,10 +85,12 @@ func setupRepo(cfg *config.WorkspaceConfig, repo config.RepoConfig, opts SetupOp
 	return nil
 }
 
-// LinkAgents symlinks agent .md files into targetDir's .claude/agents/ dir.
-func LinkAgents(targetDir string, agentNames []string, agentsPath string, dryRun bool) error {
-	if len(agentNames) == 0 {
-		return nil
+// LinkAgents symlinks all agent .md files from agentsPath into targetDir's .claude/agents/ dir.
+// Every repo gets every agent so sessions can spawn cross-repo work.
+func LinkAgents(targetDir string, agentsPath string, dryRun bool) error {
+	entries, err := os.ReadDir(agentsPath)
+	if err != nil {
+		return fmt.Errorf("reading agents directory %s: %w", agentsPath, err)
 	}
 
 	agentsDir := filepath.Join(targetDir, ".claude", "agents")
@@ -99,21 +101,21 @@ func LinkAgents(targetDir string, agentNames []string, agentsPath string, dryRun
 		}
 	}
 
-	for _, agentName := range agentNames {
-		src := filepath.Join(agentsPath, agentName+".md")
-		dst := filepath.Join(agentsDir, agentName+".md")
-
-		if _, err := os.Stat(src); os.IsNotExist(err) {
-			fmt.Printf("    %s agent definition not found: %s\n", warn("!"), agentName)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
 			continue
 		}
+
+		src := filepath.Join(agentsPath, entry.Name())
+		dst := filepath.Join(agentsDir, entry.Name())
 
 		if !dryRun {
 			_ = os.Remove(dst)
 			if err := os.Symlink(src, dst); err != nil {
-				return fmt.Errorf("symlink agent %s: %w", agentName, err)
+				return fmt.Errorf("symlink agent %s: %w", entry.Name(), err)
 			}
 		}
+		agentName := strings.TrimSuffix(entry.Name(), ".md")
 		fmt.Printf("    linked agent: %s\n", agentName)
 	}
 
@@ -180,7 +182,7 @@ func generateSettings(repoDir string, dryRun bool) error {
 
 // generateCLAUDEmd writes .claude/CLAUDE.md with workspace context for the lead session.
 // Always overwrites — this is a generated file.
-func generateCLAUDEmd(cfg *config.WorkspaceConfig, repo config.RepoConfig, repoDir string, dryRun bool) error {
+func generateCLAUDEmd(cfg *config.WorkspaceConfig, repo config.RepoConfig, repoDir string, agentsPath string, dryRun bool) error {
 	path := filepath.Join(repoDir, ".claude", "CLAUDE.md")
 
 	if dryRun {
@@ -225,7 +227,17 @@ func generateCLAUDEmd(cfg *config.WorkspaceConfig, repo config.RepoConfig, repoD
 	b.WriteString("Prefer shared actions from `OwnPulse/gh-actions` over inline workflow steps.\n")
 	b.WriteString("Reference as: `uses: OwnPulse/gh-actions/<action-name>@v1`\n")
 
-	b.WriteString("\n## Agents in this repo\n\n")
+	b.WriteString("\n## Agents\n\n")
+
+	// Discover all agents from the definitions directory.
+	allAgents := []string{}
+	if entries, err := os.ReadDir(agentsPath); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".md") {
+				allAgents = append(allAgents, strings.TrimSuffix(entry.Name(), ".md"))
+			}
+		}
+	}
 
 	// Categorize agents into write and read-only for clarity.
 	writeAgents := []string{}
@@ -238,7 +250,7 @@ func generateCLAUDEmd(cfg *config.WorkspaceConfig, repo config.RepoConfig, repoD
 		"arch-review":        true,
 		"feature-plan":       true,
 	}
-	for _, a := range repo.Agents {
+	for _, a := range allAgents {
 		if reviewSet[a] {
 			reviewAgents = append(reviewAgents, a)
 		} else {
