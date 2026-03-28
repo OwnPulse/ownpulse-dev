@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag, or commit SHA to build from"
+        required: true
+        default: "main"
 
 permissions:
   contents: write
@@ -14,6 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
           fetch-depth: 0  # needed for git describe in VERSION
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
@@ -32,9 +39,28 @@ jobs:
           sha256sum opdev-* > checksums.txt
           cat checksums.txt
 
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # For dispatch builds, use short SHA as version identifier
+            SHA=$(git rev-parse --short HEAD)
+            REF="${{ github.event.inputs.ref }}"
+            echo "tag=dev-${REF}-${SHA}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "name=Dev build: ${REF} (${SHA})" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "name=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe  # v2
         with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.name }}
+          prerelease: ${{ steps.version.outputs.prerelease == 'true' }}
           files: |
             dist/opdev-*
             dist/checksums.txt
