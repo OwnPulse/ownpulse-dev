@@ -58,3 +58,8 @@ cd web && tsc --noEmit
 cd web && npm test
 cd web && npm run test:e2e
 ```
+
+## Cleanup
+When your work is complete (committed or abandoned), clean up your worktree and branch.
+If you were spawned with `isolation: "worktree"`, the lead session handles cleanup —
+but if you created any additional worktrees yourself, remove them before finishing.

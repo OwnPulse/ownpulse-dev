@@ -35,3 +35,8 @@ npm run preview
 ```
 
 Verify the build succeeds and spot-check pages in preview. There is no test suite — the build itself is the primary check (Astro fails on broken links, missing imports, type errors).
+
+## Cleanup
+When your work is complete (committed or abandoned), clean up your worktree and branch.
+If you were spawned with `isolation: "worktree"`, the lead session handles cleanup —
+but if you created any additional worktrees yourself, remove them before finishing.

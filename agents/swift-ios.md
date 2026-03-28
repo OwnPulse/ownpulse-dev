@@ -57,3 +57,8 @@ You are a senior iOS engineer working on the OwnPulse iOS app — a SwiftUI appl
 xcodebuild test -scheme OwnPulse -destination 'platform=iOS Simulator,name=iPhone 16'
 maestro test ios/maestro/flows/
 ```
+
+## Cleanup
+When your work is complete (committed or abandoned), clean up your worktree and branch.
+If you were spawned with `isolation: "worktree"`, the lead session handles cleanup —
+but if you created any additional worktrees yourself, remove them before finishing.
