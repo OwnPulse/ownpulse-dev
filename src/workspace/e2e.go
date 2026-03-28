@@ -24,11 +24,8 @@ const (
 	apiRelease = "api"
 	webRelease = "web"
 
-	pgFullname  = "pg-postgres"
+	pgFullname  = "pg-ownpulse-postgres"
 	apiFullname = "api-ownpulse-api"
-
-	// k3d context name — k3d always creates contexts with this prefix.
-	k3dContext = "k3d-" + e2eClusterName
 )
 
 // E2EOptions controls the e2e subcommand behavior.
@@ -298,7 +295,7 @@ func e2eCreateSecrets(_ string, dryRun bool) error {
 	}
 
 	// API secret.
-	dbURL := fmt.Sprintf("postgres://postgres:devpassword@%s:5432/ownpulse?sslmode=disable", pgFullname)
+	dbURL := fmt.Sprintf("postgres://postgres:devpassword@%s:5432/ownpulse?sslmode=require", pgFullname)
 	if err := applySecret(kc, e2eNamespace, "ownpulse-api-secret", map[string]string{
 		"DATABASE_URL":   dbURL,
 		"JWT_SECRET":     "dev-only-change-me",
