@@ -45,6 +45,7 @@ create a workspace.override.toml alongside it.`,
 		listCmd(),
 		sessionCmd(),
 		cleanCmd(),
+		e2eCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -234,6 +235,53 @@ func cleanCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&repo, "repo", "", "repo name (default: detect from cwd)")
+	return cmd
+}
+
+func e2eCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "e2e [up|build|seed|status|teardown]",
+		Short: "Manage a local k3d cluster for end-to-end testing",
+		Long: `Creates and manages a local k3d Kubernetes cluster that mirrors
+production. Builds Docker images, deploys via Helm, and seeds test data.
+
+Requires: docker, k3d, kubectl, helm`,
+		Example: `  opdev e2e             # full setup: cluster + build + deploy + seed
+  opdev e2e up          # same as above
+  opdev e2e build       # rebuild images and redeploy
+  opdev e2e seed        # re-seed test data only
+  opdev e2e status      # show pods, services, health checks
+  opdev e2e teardown    # delete the cluster`,
+		Args:      cobra.MaximumNArgs(1),
+		ValidArgs: []string{"up", "build", "seed", "status", "teardown"},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig()
+			if err != nil {
+				return err
+			}
+
+			opts := workspace.E2EOptions{DryRun: dryRun}
+			sub := "up"
+			if len(args) > 0 {
+				sub = args[0]
+			}
+
+			switch sub {
+			case "up":
+				return workspace.E2EUp(cfg, opts)
+			case "build":
+				return workspace.E2EBuild(cfg, opts)
+			case "seed":
+				return workspace.E2ESeed(cfg, opts)
+			case "status":
+				return workspace.E2EStatus(cfg, opts)
+			case "teardown":
+				return workspace.E2ETeardown(cfg, opts)
+			default:
+				return fmt.Errorf("unknown e2e subcommand: %s", sub)
+			}
+		},
+	}
 	return cmd
 }
 
