@@ -35,3 +35,8 @@ cd userdocs && pip install -r requirements.txt
 cd userdocs && mkdocs build --strict
 cd userdocs && mkdocs serve   # preview at localhost:8000
 ```
+
+## Cleanup
+When your work is complete (committed or abandoned), clean up your worktree and branch.
+If you were spawned with `isolation: "worktree"`, the lead session handles cleanup —
+but if you created any additional worktrees yourself, remove them before finishing.

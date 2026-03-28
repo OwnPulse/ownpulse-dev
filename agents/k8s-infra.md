@@ -42,3 +42,8 @@ You are a senior platform engineer working on OwnPulse infrastructure — a k3s-
 cd opentofu && tofu validate
 helm lint helm/api helm/web
 ```
+
+## Cleanup
+When your work is complete (committed or abandoned), clean up your worktree and branch.
+If you were spawned with `isolation: "worktree"`, the lead session handles cleanup —
+but if you created any additional worktrees yourself, remove them before finishing.

@@ -165,6 +165,8 @@ func TestGenerateCLAUDEmd(t *testing.T) {
 		"arch-review",
 		"isolation: \"worktree\"",
 		"define the API contract",
+		"Clean up after yourself",
+		"opdev clean --all",
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("missing %q in CLAUDE.md", want)

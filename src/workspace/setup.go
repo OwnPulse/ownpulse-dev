@@ -296,7 +296,11 @@ func generateCLAUDEmd(cfg *config.WorkspaceConfig, repo config.RepoConfig, repoD
 	b.WriteString("   - principles-guardian — for data collection, export, sharing, integrations\n")
 	b.WriteString("6. Fix issues flagged by reviewers. **All must-fix items from test-review must be\n")
 	b.WriteString("   resolved before committing** — test gaps are never deferred. Ask write agents\n")
-	b.WriteString("   to add missing tests, then re-run test-review to confirm.\n\n")
+	b.WriteString("   to add missing tests, then re-run test-review to confirm.\n")
+	b.WriteString("7. **Clean up after yourself.** When a task is complete (committed or abandoned),\n")
+	b.WriteString("   remove worktrees and branches that are no longer needed. Run `opdev clean --all`\n")
+	b.WriteString("   or manually `git worktree remove <path>` + `git branch -d <branch>`. Agent\n")
+	b.WriteString("   worktrees (`.claude/worktrees/agent-*`) accumulate fast — don't leave them.\n\n")
 
 	b.WriteString("Keep implementations minimal. Prefer fewer files, less indirection, and no\n")
 	b.WriteString("speculative features. If three lines work, don't write a helper.\n")

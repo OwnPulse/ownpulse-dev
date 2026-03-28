@@ -53,9 +53,20 @@ func ensureLocalCluster() error {
 	kc := e2eKubeconfig()
 	if _, err := os.Stat(kc); os.IsNotExist(err) {
 		// Cluster exists but kubeconfig was cleaned up — regenerate it.
-		return runSilent("k3d", "kubeconfig", "get", e2eClusterName, "--output", kc)
+		return writeKubeconfig(kc)
 	}
 	return nil
+}
+
+// writeKubeconfig runs `k3d kubeconfig get` and writes stdout to the given path.
+// k3d doesn't support --output on all versions, so we capture stdout instead.
+func writeKubeconfig(path string) error {
+	os.MkdirAll(filepath.Dir(path), 0755)
+	out, err := exec.Command("k3d", "kubeconfig", "get", e2eClusterName).Output()
+	if err != nil {
+		return fmt.Errorf("k3d kubeconfig get: %w", err)
+	}
+	return os.WriteFile(path, out, 0600)
 }
 
 // kubectl runs a kubectl command against the local k3d cluster ONLY.
@@ -213,7 +224,7 @@ func e2eCreateCluster(_ string, dryRun bool) error {
 		kc := e2eKubeconfig()
 		if _, err := os.Stat(kc); os.IsNotExist(err) {
 			os.MkdirAll(filepath.Dir(kc), 0755)
-			_ = runSilent("k3d", "kubeconfig", "get", e2eClusterName, "--output", kc)
+			_ = writeKubeconfig(kc)
 		}
 		return nil
 	}
@@ -230,7 +241,7 @@ func e2eCreateCluster(_ string, dryRun bool) error {
 	// Write dedicated kubeconfig — never pollute the default context.
 	kc := e2eKubeconfig()
 	os.MkdirAll(filepath.Dir(kc), 0755)
-	if err := runSilent("k3d", "kubeconfig", "get", e2eClusterName, "--output", kc); err != nil {
+	if err := writeKubeconfig(kc); err != nil {
 		return fmt.Errorf("writing kubeconfig: %w", err)
 	}
 
