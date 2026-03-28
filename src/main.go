@@ -46,6 +46,7 @@ create a workspace.override.toml alongside it.`,
 		sessionCmd(),
 		cleanCmd(),
 		e2eCmd(),
+		updateCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -283,6 +284,22 @@ Requires: docker, k3d, kubectl, helm`,
 		},
 	}
 	return cmd
+}
+
+func updateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "update",
+		Short: "Update opdev to the latest release",
+		Long: `Downloads the latest opdev release from GitHub and replaces the
+current binary. Supports macOS (arm64, amd64) and Linux (arm64, amd64).
+
+May require sudo if installed to a system directory like /usr/local/bin.`,
+		Example: `  opdev update
+  opdev update --dry-run`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return workspace.Update(version, workspace.UpdateOptions{DryRun: dryRun})
+		},
+	}
 }
 
 func resolveAgentsPath(cfg *config.WorkspaceConfig) (string, error) {
