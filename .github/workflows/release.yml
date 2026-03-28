@@ -56,13 +56,18 @@ jobs:
           fi
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe  # v2
-        with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: ${{ steps.version.outputs.name }}
-          prerelease: ${{ steps.version.outputs.prerelease == 'true' }}
-          files: |
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ARGS=(
+            "${{ steps.version.outputs.tag }}"
+            --title "${{ steps.version.outputs.name }}"
+            --generate-notes
+            --target "${{ github.sha }}"
             dist/opdev-*
             dist/checksums.txt
-          generate_release_notes: true
-          fail_on_unmatched_files: true
+          )
+          if [ "${{ steps.version.outputs.prerelease }}" = "true" ]; then
+            ARGS+=(--prerelease)
+          fi
+          gh release create "${ARGS[@]}"
