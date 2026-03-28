@@ -221,30 +221,20 @@ If no name is given, a random ID is used.`,
 
 func cleanCmd() *cobra.Command {
 	var repo string
-	var all bool
 
 	cmd := &cobra.Command{
 		Use:   "clean",
-		Short: "Remove stale worktrees and their branches",
-		Long: `Removes agent worktrees (.claude/worktrees/agent-*), session worktrees
-(worktrees/<repo>-*), prunes git worktree metadata, and deletes orphaned
-branches created by worktrees that are already merged to main.
-
-Skips the worktree you're currently inside.`,
-		Example: `  opdev clean            # clean current repo
-  opdev clean --all      # clean all repos
-  opdev clean --repo ownpulse`,
+		Short: "Prune stale worktrees",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := loadConfig()
 			if err != nil {
 				return err
 			}
-			return workspace.CleanSessions(cfg, repo, all, dryRun)
+			return workspace.CleanSessions(cfg, repo, dryRun)
 		},
 	}
 
 	cmd.Flags().StringVar(&repo, "repo", "", "repo name (default: detect from cwd)")
-	cmd.Flags().BoolVar(&all, "all", false, "clean all repos in the workspace")
 	return cmd
 }
 
