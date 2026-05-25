@@ -73,6 +73,18 @@ var ErrSopsNotInstalled = errors.New("sops not installed")
 // HTTPGetter is a minimal HTTP GET function for dependency injection in tests.
 type HTTPGetter func(url string, headers map[string]string) ([]byte, error)
 
+// MissingCredentialsError is returned by ResolveCredentials when one or more
+// credential fields could not be resolved from any source. Callers can use
+// errors.As to detect this and add their own context (e.g. the workspace-config
+// SOPS path opdev's main looked at).
+type MissingCredentialsError struct {
+	Fields []string
+}
+
+func (e *MissingCredentialsError) Error() string {
+	return "credentials missing — " + strings.Join(e.Fields, ", ")
+}
+
 // ASCError represents a non-success App Store Connect response.
 type ASCError struct {
 	Status int
@@ -875,27 +887,26 @@ func truncate(s string, n int) string {
 // Defaults
 // --------------------------------------------------------------------------
 
-// DefaultSOPSPath returns $OWNPULSE_INFRA_PATH/secrets/ios/appstore-connect.sops.yaml
-// or "" if OWNPULSE_INFRA_PATH is unset.
-func DefaultSOPSPath() string {
-	infra := os.Getenv("OWNPULSE_INFRA_PATH")
-	if infra == "" {
-		return ""
-	}
-	return infra + "/" + sopsRelPath
-}
+// SOPSRelPath is the conventional path inside an ownpulse-infra checkout to
+// the App Store Connect credentials YAML. Exported so callers (e.g. opdev's
+// main package, which owns workspace-config lookups) can build the absolute
+// path themselves.
+const SOPSRelPath = sopsRelPath
 
 // ResolveCredentials resolves credentials field-by-field, with precedence:
 //
 //  1. Explicit field on `explicit` (e.g. --key-id flag, --app-id flag)
 //  2. Environment variable (ASC_KEY_ID, ASC_ISSUER_ID, ASC_APP_ID, ASC_KEY_PEM)
-//  3. Field loaded from the SOPS-decrypted YAML (if SOPSPath or
-//     OWNPULSE_INFRA_PATH yields one)
+//  3. Field loaded from the SOPS-decrypted YAML at `explicit.SOPSPath`
 //
 // Each field is resolved independently — passing only --key-id with the rest
 // in SOPS produces a merged result rather than silently dropping the flag.
 // Returns an error naming every field that could not be filled from any
 // source.
+//
+// This function is workspace-config-agnostic: the SOPS path must be supplied
+// by the caller. opdev's main package owns the flag/env/workspace.toml
+// resolution and passes the final path in.
 //
 // Note: there is no --key-pem flag (and intentionally so — PEM contents on the
 // command line leak via ps/shell history). Only env or SOPS can supply KeyPEM.
@@ -909,9 +920,6 @@ func ResolveCredentials(explicit CredentialOptions) (*Credentials, error) {
 		sopsErr   error
 	)
 	sopsPath := explicit.SOPSPath
-	if sopsPath == "" {
-		sopsPath = DefaultSOPSPath()
-	}
 	if sopsPath != "" {
 		sopsCreds, sopsErr = LoadCredentials(CredentialOptions{
 			SOPSPath:   sopsPath,
@@ -968,12 +976,7 @@ func ResolveCredentials(explicit CredentialOptions) (*Credentials, error) {
 			return nil, fmt.Errorf("credentials missing — %s; (SOPS load also failed: %w)",
 				strings.Join(missing, ", "), sopsErr)
 		}
-		// When nothing at all was supplied, prefer the short discoverable hint.
-		// Otherwise name the specific fields that are missing.
-		if keyID == "" && issuerID == "" && appID == "" && len(keyPEM) == 0 && sopsPath == "" {
-			return nil, errors.New("credentials missing — set OWNPULSE_INFRA_PATH or ASC_KEY_ID/ASC_ISSUER_ID/ASC_APP_ID/ASC_KEY_PEM")
-		}
-		return nil, fmt.Errorf("credentials missing — %s", strings.Join(missing, ", "))
+		return nil, &MissingCredentialsError{Fields: missing}
 	}
 
 	return &Credentials{

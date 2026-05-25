@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -331,11 +332,18 @@ func crashesCmd() *cobra.Command {
 		Short: "Diagnose iOS crashes via App Store Connect",
 		Long: `Pulls crash signatures and tester feedback from App Store Connect.
 
-Credentials are resolved field-by-field, with this precedence:
-  1. Explicit --key-id / --issuer-id / --app-id flags (no --key-pem; argv leaks)
+The SOPS-encrypted credentials file is located in this order:
+  1. --sops-path <file>                  explicit override
+  2. $OWNPULSE_INFRA_PATH/secrets/...    legacy / non-workspace use
+  3. workspace config                    looks up ownpulse-infra repo at
+                                         <clone_root>/ownpulse-infra/secrets/
+                                         ios/appstore-connect.sops.yaml
+
+Individual fields can also be supplied directly, with this precedence:
+  1. --key-id / --issuer-id / --app-id flags (no --key-pem; argv leaks)
   2. Env: ASC_KEY_ID, ASC_ISSUER_ID, ASC_APP_ID, ASC_KEY_PEM
      (ASC_KEY_PEM holds the *contents* of the .p8 file, not a path)
-  3. --sops-path <file>, or $OWNPULSE_INFRA_PATH/secrets/ios/appstore-connect.sops.yaml
+  3. Values from the SOPS YAML located above
 
 The decrypted PEM stays in memory only; never written to disk.`,
 	}
@@ -478,13 +486,121 @@ func crashesCrashFeedbackCmd() *cobra.Command {
 	return cmd
 }
 
+// sopsPathLookup tracks the SOPS-path resolution for a given invocation so we
+// can emit a rich error if everything falls through.
+type sopsPathLookup struct {
+	resolved      string // final path (may be empty)
+	source        string // "flag", "env", "workspace-config", or "none"
+	configAttempt string // expected workspace path if config was consulted
+	configProblem string // why config lookup didn't yield a usable path, if any
+}
+
+// resolveSOPSPath applies the documented resolution order. It does NOT verify
+// the file exists; downstream LoadCredentials handles that. Errors from
+// loadConfig are intentionally swallowed — opdev should still work when run
+// outside a workspace.
+func resolveSOPSPath(flagPath string) sopsPathLookup {
+	if flagPath != "" {
+		return sopsPathLookup{resolved: flagPath, source: "flag"}
+	}
+	if env := os.Getenv("OWNPULSE_INFRA_PATH"); env != "" {
+		return sopsPathLookup{
+			resolved: filepath.Join(env, crashes.SOPSRelPath),
+			source:   "env",
+		}
+	}
+
+	out := sopsPathLookup{source: "none"}
+	cfg, err := loadConfig()
+	if err != nil {
+		out.configProblem = fmt.Sprintf("workspace config not loadable (%v)", err)
+		return out
+	}
+
+	const infraRepo = "ownpulse-infra"
+	var repo *config.RepoConfig
+	for i := range cfg.Repos {
+		if cfg.Repos[i].Name == infraRepo {
+			repo = &cfg.Repos[i]
+			break
+		}
+	}
+	if repo == nil {
+		out.configProblem = fmt.Sprintf("repo %q not registered in workspace", infraRepo)
+		return out
+	}
+
+	candidate := filepath.Join(cfg.Workspace.CloneRoot, repo.Name, crashes.SOPSRelPath)
+	out.configAttempt = candidate
+	if _, err := os.Stat(candidate); err != nil {
+		out.configProblem = fmt.Sprintf("expected file not present at %s (%v)", candidate, err)
+		return out
+	}
+	out.resolved = candidate
+	out.source = "workspace-config"
+	return out
+}
+
 func resolveCrashesCredentials(f *crashesFlags) (*crashes.Credentials, error) {
-	return crashes.ResolveCredentials(crashes.CredentialOptions{
+	lookup := resolveSOPSPath(f.sopsPath)
+	creds, err := crashes.ResolveCredentials(crashes.CredentialOptions{
 		KeyID:    f.keyID,
 		IssuerID: f.issuerID,
 		AppID:    f.appID,
-		SOPSPath: f.sopsPath,
+		SOPSPath: lookup.resolved,
 	})
+	if err != nil {
+		var miss *crashes.MissingCredentialsError
+		if errors.As(err, &miss) {
+			return nil, missingCredsMessage(lookup, miss)
+		}
+		return nil, err
+	}
+	return creds, nil
+}
+
+// missingCredsMessage builds the multi-paragraph error users see when no
+// resolution path produced credentials. The intent is to help them figure out
+// which knob to turn next.
+func missingCredsMessage(lookup sopsPathLookup, miss *crashes.MissingCredentialsError) error {
+	// Describe each source the way the user would think about it.
+	flagLine := "1. --sops-path flag (not set)"
+	if lookup.source == "flag" {
+		flagLine = fmt.Sprintf("1. --sops-path %s (used; load failed or fields missing)", lookup.resolved)
+	}
+
+	envVal := os.Getenv("OWNPULSE_INFRA_PATH")
+	envLine := "2. OWNPULSE_INFRA_PATH env (not set)"
+	if envVal != "" {
+		envLine = fmt.Sprintf("2. OWNPULSE_INFRA_PATH=%s (used; load failed or fields missing)", envVal)
+	}
+
+	var configLine string
+	switch {
+	case lookup.source == "workspace-config":
+		configLine = fmt.Sprintf("3. workspace config: %s (used; load failed or fields missing)", lookup.resolved)
+	case lookup.configProblem != "":
+		configLine = fmt.Sprintf("3. workspace config: %s", lookup.configProblem)
+	default:
+		configLine = "3. workspace config: not consulted"
+	}
+
+	ascLine := "4. ASC_KEY_ID/ASC_ISSUER_ID/ASC_APP_ID/ASC_KEY_PEM env vars (not all set)"
+
+	body := strings.Join([]string{
+		"credentials missing. Tried:",
+		"  " + flagLine,
+		"  " + envLine,
+		"  " + configLine,
+		"  " + ascLine,
+		"",
+		"Run `opdev list` to see registered repos. Run `opdev setup` to clone missing ones.",
+	}, "\n")
+
+	if len(miss.Fields) > 0 {
+		body += "\n\nMissing fields: " + strings.Join(miss.Fields, ", ")
+	}
+	return errors.New(body)
 }
 
 func resolveAgentsPath(cfg *config.WorkspaceConfig) (string, error) {
