@@ -317,10 +317,11 @@ type crashesFlags struct {
 	sopsPath string
 	appID    string
 
-	// Mostly for tests / power users.
+	// Mostly for tests / power users. Note: no --key-pem flag — PEM contents
+	// passed on argv would leak via ps(1), shell history, and process
+	// accounting. The PEM must come from ASC_KEY_PEM or SOPS.
 	keyID    string
 	issuerID string
-	keyPEM   string
 	buildID  string
 }
 
@@ -330,8 +331,8 @@ func crashesCmd() *cobra.Command {
 		Short: "Diagnose iOS crashes via App Store Connect",
 		Long: `Pulls crash signatures and tester feedback from App Store Connect.
 
-Credentials are resolved in this order:
-  1. Explicit --key-id/--issuer-id/--app-id/--key-pem flags
+Credentials are resolved field-by-field, with this precedence:
+  1. Explicit --key-id / --issuer-id / --app-id flags (no --key-pem; argv leaks)
   2. Env: ASC_KEY_ID, ASC_ISSUER_ID, ASC_APP_ID, ASC_KEY_PEM
      (ASC_KEY_PEM holds the *contents* of the .p8 file, not a path)
   3. --sops-path <file>, or $OWNPULSE_INFRA_PATH/secrets/ios/appstore-connect.sops.yaml
@@ -356,7 +357,8 @@ func addCommonCrashesFlags(cmd *cobra.Command, f *crashesFlags) {
 	cmd.Flags().StringVar(&f.appID, "app-id", "", "override app id from credentials/env")
 	cmd.Flags().StringVar(&f.keyID, "key-id", "", "explicit App Store Connect key id")
 	cmd.Flags().StringVar(&f.issuerID, "issuer-id", "", "explicit App Store Connect issuer id")
-	cmd.Flags().StringVar(&f.keyPEM, "key-pem", "", "explicit App Store Connect private key PEM contents")
+	// No --key-pem flag by design: PEM contents in argv leak via ps(1), shell
+	// history, and process accounting. Use the ASC_KEY_PEM env var or SOPS.
 }
 
 func crashesDiagnoseCmd() *cobra.Command {
@@ -481,7 +483,6 @@ func resolveCrashesCredentials(f *crashesFlags) (*crashes.Credentials, error) {
 		KeyID:    f.keyID,
 		IssuerID: f.issuerID,
 		AppID:    f.appID,
-		KeyPEM:   []byte(f.keyPEM),
 		SOPSPath: f.sopsPath,
 	})
 }

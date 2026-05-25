@@ -15,6 +15,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -153,12 +155,17 @@ func TestMintJWT_RejectsRSA(t *testing.T) {
 // ListBuilds
 // ---------------------------------------------------------------------------
 
-// stubGetter returns canned JSON responses keyed by URL substring. If multiple
-// responses are configured (sequence mode), it returns them in order.
+// stubResponse pairs a body with an optional error (used to simulate 404s etc.).
+type stubResponse struct {
+	body []byte
+	err  error
+}
+
+// stubGetter returns canned responses in order. Each call consumes one entry.
 type stubGetter struct {
 	t         *testing.T
 	calls     []string
-	responses [][]byte
+	responses []stubResponse
 	idx       int
 }
 
@@ -167,9 +174,18 @@ func (s *stubGetter) get(url string, _ map[string]string) ([]byte, error) {
 	if s.idx >= len(s.responses) {
 		s.t.Fatalf("unexpected call #%d to %s", s.idx+1, url)
 	}
-	body := s.responses[s.idx]
+	r := s.responses[s.idx]
 	s.idx++
-	return body, nil
+	return r.body, r.err
+}
+
+// newStub builds a stubGetter from raw byte bodies (no errors).
+func newStub(t *testing.T, bodies ...[]byte) *stubGetter {
+	resps := make([]stubResponse, len(bodies))
+	for i, b := range bodies {
+		resps[i] = stubResponse{body: b}
+	}
+	return &stubGetter{t: t, responses: resps}
 }
 
 func TestListBuilds_SinceFilter(t *testing.T) {
@@ -191,7 +207,7 @@ func TestListBuilds_SinceFilter(t *testing.T) {
 		},
 		"links": map[string]interface{}{"next": nil},
 	})
-	stub := &stubGetter{t: t, responses: [][]byte{body}}
+	stub := newStub(t, body)
 	since := now.Add(-24 * time.Hour)
 	builds, err := ListBuilds("tok", "app-1", &since, stub.get)
 	if err != nil {
@@ -214,7 +230,7 @@ func TestListBuilds_PaginationFollowsNext(t *testing.T) {
 		"data":  []interface{}{map[string]interface{}{"id": "b", "attributes": map[string]interface{}{}}},
 		"links": map[string]interface{}{"next": nil},
 	})
-	stub := &stubGetter{t: t, responses: [][]byte{page1, page2}}
+	stub := newStub(t, page1, page2)
 	builds, err := ListBuilds("tok", "app-1", nil, stub.get)
 	if err != nil {
 		t.Fatalf("ListBuilds: %v", err)
@@ -232,7 +248,7 @@ func TestListBuilds_RejectsOffHost(t *testing.T) {
 		"data":  []interface{}{},
 		"links": map[string]interface{}{"next": "https://evil.com/v1/builds?cursor=2"},
 	})
-	stub := &stubGetter{t: t, responses: [][]byte{page1}}
+	stub := newStub(t, page1)
 	_, err := ListBuilds("tok", "app-1", nil, stub.get)
 	if err == nil {
 		t.Fatal("expected off-host rejection, got nil")
@@ -248,7 +264,7 @@ func TestListBuilds_RejectsHTTPScheme(t *testing.T) {
 		"data":  []interface{}{},
 		"links": map[string]interface{}{"next": "http://api.appstoreconnect.apple.com/v1/builds?cursor=2"},
 	})
-	stub := &stubGetter{t: t, responses: [][]byte{page1}}
+	stub := newStub(t, page1)
 	_, err := ListBuilds("tok", "app-1", nil, stub.get)
 	if err == nil {
 		t.Fatal("expected http-scheme rejection, got nil")
@@ -256,6 +272,44 @@ func TestListBuilds_RejectsHTTPScheme(t *testing.T) {
 	var ascErr *ASCError
 	if !errors.As(err, &ascErr) {
 		t.Fatalf("expected *ASCError, got %T", err)
+	}
+}
+
+// TestAssertASCHost_Vectors locks the host-pin invariants against common
+// bypass patterns. Both accept-cases and reject-cases share one table.
+func TestAssertASCHost_Vectors(t *testing.T) {
+	cases := []struct {
+		name      string
+		url       string
+		wantError bool
+	}{
+		{"canonical", "https://api.appstoreconnect.apple.com/v1/builds", false},
+		{"canonical with query", "https://api.appstoreconnect.apple.com/v1/builds?cursor=x", false},
+		{"mixed case host", "https://API.AppStoreConnect.apple.com/v1/builds", false},
+		{"mixed case scheme", "HTTPS://api.appstoreconnect.apple.com/v1/builds", false},
+
+		{"plain http", "http://api.appstoreconnect.apple.com/v1/builds", true},
+		{"suffix attack", "https://api.appstoreconnect.apple.com.evil.com/v1/builds", true},
+		{"prefix attack", "https://evil-api.appstoreconnect.apple.com/v1/builds", true},
+		{"userinfo override", "https://api.appstoreconnect.apple.com@evil.com/v1/builds", true},
+		{"userinfo with apple host", "https://user:pass@api.appstoreconnect.apple.com/v1/builds", true},
+		{"embedded at ambiguity", "https://api.appstoreconnect.apple.com#@evil.com/v1/builds", false}, // fragment, host pin still wins
+		{"ip literal", "https://17.0.0.1/v1/builds", true},
+		{"file scheme", "file:///etc/passwd", true},
+		{"empty", "", true},
+		{"garbage", "::::not a url", true},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			err := assertASCHost(c.url)
+			if c.wantError && err == nil {
+				t.Fatalf("assertASCHost(%q) = nil, want error", c.url)
+			}
+			if !c.wantError && err != nil {
+				t.Fatalf("assertASCHost(%q) = %v, want nil", c.url, err)
+			}
+		})
 	}
 }
 
@@ -349,4 +403,283 @@ func TestLoadCredentials_SOPSMissing(t *testing.T) {
 
 func writeFile(path, contents string) error {
 	return os.WriteFile(path, []byte(contents), 0o600)
+}
+
+// ---------------------------------------------------------------------------
+// ResolveCredentials — field-by-field precedence
+// ---------------------------------------------------------------------------
+
+func TestResolveCredentials_FieldByFieldPrecedence(t *testing.T) {
+	// Clear any inherited env so we start from a known baseline.
+	clearAllASCEnv := func(t *testing.T) {
+		t.Helper()
+		for _, k := range []string{"ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_APP_ID", "ASC_KEY_PEM", "OWNPULSE_INFRA_PATH"} {
+			t.Setenv(k, "")
+		}
+	}
+
+	// Pre-baked SOPS stub used by the cases that exercise the SOPS layer.
+	sopsYAML := "key_id: sops-kid\n" +
+		"issuer_id: sops-iss\n" +
+		"app_id: sops-app\n" +
+		"key_pem: sops-pem\n"
+	sopsRunner := func(_ string) ([]byte, error) { return []byte(sopsYAML), nil }
+	makeSOPSFile := func(t *testing.T) string {
+		t.Helper()
+		path := t.TempDir() + "/fake.yaml"
+		if err := writeFile(path, "stub"); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	type want struct {
+		KeyID, IssuerID, AppID, KeyPEM string
+	}
+
+	t.Run("all flags win", func(t *testing.T) {
+		clearAllASCEnv(t)
+		// Even if env + SOPS would also supply values, flags win on all four.
+		t.Setenv("ASC_KEY_ID", "env-kid")
+		t.Setenv("ASC_ISSUER_ID", "env-iss")
+		t.Setenv("ASC_APP_ID", "env-app")
+		t.Setenv("ASC_KEY_PEM", "env-pem")
+		creds, err := ResolveCredentials(CredentialOptions{
+			KeyID: "flag-kid", IssuerID: "flag-iss", AppID: "flag-app",
+		})
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		// KeyPEM has no flag → env wins.
+		got := want{creds.KeyID, creds.IssuerID, creds.AppID, string(creds.KeyPEM)}
+		if got != (want{"flag-kid", "flag-iss", "flag-app", "env-pem"}) {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
+	t.Run("env wins when no flags", func(t *testing.T) {
+		clearAllASCEnv(t)
+		t.Setenv("ASC_KEY_ID", "env-kid")
+		t.Setenv("ASC_ISSUER_ID", "env-iss")
+		t.Setenv("ASC_APP_ID", "env-app")
+		t.Setenv("ASC_KEY_PEM", "env-pem")
+		creds, err := ResolveCredentials(CredentialOptions{})
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		got := want{creds.KeyID, creds.IssuerID, creds.AppID, string(creds.KeyPEM)}
+		if got != (want{"env-kid", "env-iss", "env-app", "env-pem"}) {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
+	t.Run("sops wins when no flags or env", func(t *testing.T) {
+		clearAllASCEnv(t)
+		creds, err := ResolveCredentials(CredentialOptions{
+			SOPSPath:   makeSOPSFile(t),
+			SopsRunner: sopsRunner,
+		})
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		got := want{creds.KeyID, creds.IssuerID, creds.AppID, string(creds.KeyPEM)}
+		if got != (want{"sops-kid", "sops-iss", "sops-app", "sops-pem"}) {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
+	t.Run("flag for one field + env for the rest", func(t *testing.T) {
+		clearAllASCEnv(t)
+		t.Setenv("ASC_ISSUER_ID", "env-iss")
+		t.Setenv("ASC_APP_ID", "env-app")
+		t.Setenv("ASC_KEY_PEM", "env-pem")
+		creds, err := ResolveCredentials(CredentialOptions{KeyID: "flag-kid"})
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		got := want{creds.KeyID, creds.IssuerID, creds.AppID, string(creds.KeyPEM)}
+		if got != (want{"flag-kid", "env-iss", "env-app", "env-pem"}) {
+			t.Fatalf("got %+v — flag should override one field without dropping the env-sourced rest", got)
+		}
+	})
+
+	t.Run("flag + env + sops merged across all fields", func(t *testing.T) {
+		clearAllASCEnv(t)
+		t.Setenv("ASC_APP_ID", "env-app")
+		creds, err := ResolveCredentials(CredentialOptions{
+			KeyID:      "flag-kid",
+			SOPSPath:   makeSOPSFile(t),
+			SopsRunner: sopsRunner,
+			// IssuerID + KeyPEM should come from SOPS, AppID from env.
+		})
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		got := want{creds.KeyID, creds.IssuerID, creds.AppID, string(creds.KeyPEM)}
+		if got != (want{"flag-kid", "sops-iss", "env-app", "sops-pem"}) {
+			t.Fatalf("got %+v — expected mixed sources", got)
+		}
+	})
+
+	t.Run("missing field across all sources errors with field name", func(t *testing.T) {
+		clearAllASCEnv(t)
+		// KeyPEM has no flag, no env, no SOPS file → must error and name key_pem.
+		_, err := ResolveCredentials(CredentialOptions{
+			KeyID: "k", IssuerID: "i", AppID: "a",
+		})
+		if err == nil {
+			t.Fatal("expected error for missing key_pem")
+		}
+		if !strings.Contains(err.Error(), "key_pem") {
+			t.Errorf("error should name key_pem, got: %v", err)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// CrashFeedback — 404 swallowed
+// ---------------------------------------------------------------------------
+
+func TestCrashFeedback_Swallows404(t *testing.T) {
+	// Both endpoints return 404 → expect no error, empty result.
+	stub := &stubGetter{
+		t: t,
+		responses: []stubResponse{
+			{err: &ASCError{Status: 404, URL: "https://api.appstoreconnect.apple.com/v1/builds/xx/perfPowerMetrics", Body: "not found"}},
+			{err: &ASCError{Status: 404, URL: "https://api.appstoreconnect.apple.com/v1/builds/xx/betaBuildLocalizations", Body: "not found"}},
+		},
+	}
+	out, err := CrashFeedback("tok", "xx", stub.get)
+	if err != nil {
+		t.Fatalf("CrashFeedback returned error on 404: %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("expected empty slice on double-404, got %d entries", len(out))
+	}
+}
+
+func TestCrashFeedback_PropagatesNon404(t *testing.T) {
+	stub := &stubGetter{
+		t: t,
+		responses: []stubResponse{
+			{err: &ASCError{Status: 500, URL: "x", Body: "internal"}},
+		},
+	}
+	_, err := CrashFeedback("tok", "xx", stub.get)
+	if err == nil {
+		t.Fatal("expected 500 to surface, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Diagnose — signal filter
+// ---------------------------------------------------------------------------
+
+func TestDiagnose_SignalFilter(t *testing.T) {
+	pemBytes, _ := genECKeyPEM(t)
+	now := time.Now().UTC()
+
+	buildsPage, _ := json.Marshal(map[string]interface{}{
+		"data": []interface{}{
+			map[string]interface{}{
+				"id":         "b1",
+				"attributes": map[string]interface{}{"uploadedDate": now.Add(-1 * time.Hour).Format(time.RFC3339)},
+			},
+		},
+		"links": map[string]interface{}{"next": nil},
+	})
+	perfPage, _ := json.Marshal(map[string]interface{}{
+		"data": []interface{}{
+			map[string]interface{}{
+				"id":         "c1",
+				"attributes": map[string]interface{}{"signature": "sig-A", "signal": "SIGSEGV"},
+			},
+			map[string]interface{}{
+				"id":         "c2",
+				"attributes": map[string]interface{}{"signature": "sig-B", "signal": "SIGABRT"},
+			},
+			map[string]interface{}{
+				"id":         "c3",
+				"attributes": map[string]interface{}{"signature": "sig-C", "signal": "EXC_BAD_ACCESS"},
+			},
+		},
+	})
+	locPage, _ := json.Marshal(map[string]interface{}{"data": []interface{}{}})
+
+	stub := newStub(t, buildsPage, perfPage, locPage)
+
+	result, err := Diagnose(
+		&Credentials{KeyID: "K", IssuerID: "I", AppID: "A", KeyPEM: pemBytes},
+		DiagnoseOptions{SignalName: "segv", HTTPGet: stub.get},
+	)
+	if err != nil {
+		t.Fatalf("Diagnose: %v", err)
+	}
+	if len(result.Diagnostics) != 1 {
+		t.Fatalf("expected 1 diagnostic after SIGSEGV filter, got %d", len(result.Diagnostics))
+	}
+	if got := result.Diagnostics[0].Signal; got == nil || *got != "SIGSEGV" {
+		t.Fatalf("signal = %v, want SIGSEGV", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DefaultHTTPGetter — redirects are not followed
+// ---------------------------------------------------------------------------
+
+func TestDefaultHTTPGetter_DoesNotFollowRedirects(t *testing.T) {
+	// Stand up two test servers: src returns a 302 to dst; dst would set a
+	// magic body. If the client follows the redirect, we'd see dst's body.
+	// We expect either an error or the 302 surfaced through our ASCError path.
+	dst := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("FOLLOWED-REDIRECT"))
+	}))
+	defer dst.Close()
+
+	src := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", dst.URL)
+		w.WriteHeader(http.StatusFound)
+		_, _ = w.Write([]byte("redirect-body"))
+	}))
+	defer src.Close()
+
+	// Trust the test servers' self-signed certs.
+	prev := http.DefaultTransport
+	http.DefaultTransport = src.Client().Transport
+	defer func() { http.DefaultTransport = prev }()
+
+	_, err := DefaultHTTPGetter(src.URL, nil)
+	if err == nil {
+		t.Fatal("expected 302 to surface as error (redirect not followed)")
+	}
+	var ascErr *ASCError
+	if !errors.As(err, &ascErr) {
+		t.Fatalf("expected *ASCError on 302, got %T: %v", err, err)
+	}
+	if ascErr.Status != http.StatusFound {
+		t.Fatalf("status = %d, want 302", ascErr.Status)
+	}
+	if strings.Contains(ascErr.Body, "FOLLOWED-REDIRECT") {
+		t.Fatal("body contains downstream content — redirect WAS followed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// redactBearer
+// ---------------------------------------------------------------------------
+
+func TestRedactBearer(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"Authorization: Bearer abc.def.ghi", "Authorization: Bearer [REDACTED]"},
+		{"bearer XYZ", "Bearer [REDACTED]"},
+		{"Bearer\tmy-token here", "Bearer [REDACTED] here"},
+		{"no token here", "no token here"},
+	}
+	for _, c := range cases {
+		if got := redactBearer(c.in); got != c.want {
+			t.Errorf("redactBearer(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
 }

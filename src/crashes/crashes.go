@@ -107,17 +107,9 @@ func MintJWT(creds *Credentials) (string, error) {
 		return "", errors.New("failed to load private key: no PEM block found")
 	}
 
-	var ecKey *ecdsa.PrivateKey
-	if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
-		k, ok := key.(*ecdsa.PrivateKey)
-		if !ok {
-			return "", fmt.Errorf("expected an EC P-256 private key (ES256), got %T", key)
-		}
-		ecKey = k
-	} else if key, err2 := x509.ParseECPrivateKey(block.Bytes); err2 == nil {
-		ecKey = key
-	} else {
-		return "", fmt.Errorf("failed to load private key: %v", err)
+	ecKey, err := loadECPrivateKey(block.Bytes)
+	if err != nil {
+		return "", err
 	}
 
 	if ecKey.Curve != elliptic.P256() {
@@ -160,6 +152,26 @@ func MintJWT(creds *Credentials) (string, error) {
 	copy(rawSig[64-len(sBytes):64], sBytes)
 
 	return signingInput + "." + b64url(rawSig), nil
+}
+
+// loadECPrivateKey parses a DER-encoded private key, accepting either PKCS#8
+// or SEC1 encoding. If both parsers fail, both errors are surfaced — the
+// PKCS#8 error is wrapped (errors.Is/As works against it) and the SEC1 error
+// is included in the message for human debugging.
+func loadECPrivateKey(der []byte) (*ecdsa.PrivateKey, error) {
+	key, err := x509.ParsePKCS8PrivateKey(der)
+	if err != nil {
+		ecKey, err2 := x509.ParseECPrivateKey(der)
+		if err2 != nil {
+			return nil, fmt.Errorf("failed to load private key (pkcs8: %w; sec1: %v)", err, err2)
+		}
+		return ecKey, nil
+	}
+	ecKey, ok := key.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("expected an EC P-256 private key (ES256), got %T", key)
+	}
+	return ecKey, nil
 }
 
 // --------------------------------------------------------------------------
@@ -221,7 +233,7 @@ func loadFromSOPS(opts CredentialOptions) (*Credentials, error) {
 		if errors.Is(err, ErrSopsNotInstalled) {
 			return nil, errors.New("'sops' not found in PATH; install with: brew install sops (or your platform equivalent)")
 		}
-		return nil, fmt.Errorf("sops -d failed: %v", err)
+		return nil, fmt.Errorf("sops -d failed: %w", err)
 	}
 
 	var doc sopsYAML
@@ -263,7 +275,7 @@ func defaultSopsRunner(path string) ([]byte, error) {
 	cmd.Stderr = &stderr
 	stdout, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("%v: %s", err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("sops invocation failed: %s: %w", strings.TrimSpace(stderr.String()), err)
 	}
 	return stdout, nil
 }
@@ -272,8 +284,25 @@ func defaultSopsRunner(path string) ([]byte, error) {
 // HTTP
 // --------------------------------------------------------------------------
 
+// bearerRedactRe matches `Bearer <token>` in error bodies so the token is
+// stripped before the body is surfaced. Apple has historically echoed request
+// headers in some error responses; this is a cheap defense.
+var bearerRedactRe = regexp.MustCompile(`(?i)Bearer\s+\S+`)
+
+func redactBearer(s string) string {
+	return bearerRedactRe.ReplaceAllString(s, "Bearer [REDACTED]")
+}
+
+// TODO(opdev): thread context.Context through the network layer once we wire
+// in a cancellation source above this CLI (signals, timeouts beyond per-request).
+// For a one-shot CLI this is acceptable; refactor when we add long-running modes.
+
 // DefaultHTTPGetter performs a real HTTPS GET. It is wired in by the CLI; tests
 // inject a stub instead.
+//
+// Redirects are NOT followed: a 3xx hops away from the App Store Connect host
+// would either silently leak the bearer token or, if we host-checked the new
+// URL, generate confusing errors. The caller (ascGet) already pins the host.
 func DefaultHTTPGetter(rawURL string, headers map[string]string) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -282,7 +311,12 @@ func DefaultHTTPGetter(rawURL string, headers map[string]string) ([]byte, error)
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -292,18 +326,32 @@ func DefaultHTTPGetter(rawURL string, headers map[string]string) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode >= 400 {
-		return nil, &ASCError{Status: resp.StatusCode, URL: rawURL, Body: string(body)}
+	if resp.StatusCode >= 300 {
+		return nil, &ASCError{Status: resp.StatusCode, URL: rawURL, Body: redactBearer(string(body))}
 	}
 	return body, nil
 }
 
+// assertASCHost pins outbound requests to https://api.appstoreconnect.apple.com.
+//
+// It enforces:
+//   - scheme is exactly "https" (case-insensitive)
+//   - hostname equals "api.appstoreconnect.apple.com" exactly (case-insensitive)
+//     — guards against suffix attacks like "api.appstoreconnect.apple.com.evil.com"
+//   - no userinfo segment ("https://user@evil.com/...") — even though url.Parse
+//     would return the userinfo's host, we reject any URL that carries one
+//   - non-empty hostname (rejects IP-literal-only or malformed inputs)
 func assertASCHost(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return &ASCError{Status: 0, URL: rawURL, Body: fmt.Sprintf("invalid URL: %v", err)}
 	}
-	if u.Scheme != "https" || u.Hostname() != ascHost {
+	if u.User != nil {
+		return &ASCError{Status: 0, URL: rawURL, Body: "refusing URL with userinfo segment"}
+	}
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+	if scheme != "https" || host != ascHost {
 		return &ASCError{Status: 0, URL: rawURL, Body: fmt.Sprintf("refusing to follow off-host URL: %s", rawURL)}
 	}
 	return nil
@@ -582,7 +630,10 @@ func ParseSince(spec string) (time.Time, error) {
 		}
 		return time.Now().UTC().Add(-time.Duration(n) * unit), nil
 	}
-	normalized := strings.Replace(spec, "Z", "+00:00", 1)
+	normalized := spec
+	if strings.HasSuffix(normalized, "Z") {
+		normalized = strings.TrimSuffix(normalized, "Z") + "+00:00"
+	}
 	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05-07:00"} {
 		if t, err := time.Parse(layout, normalized); err == nil {
 			return t.UTC(), nil
@@ -815,34 +866,101 @@ func DefaultSOPSPath() string {
 	return infra + "/" + sopsRelPath
 }
 
-// ResolveCredentials applies the credential resolution order documented on
-// `opdev crashes diagnose --help`. Explicit fields > env vars > SOPS path.
+// ResolveCredentials resolves credentials field-by-field, with precedence:
+//
+//  1. Explicit field on `explicit` (e.g. --key-id flag, --app-id flag)
+//  2. Environment variable (ASC_KEY_ID, ASC_ISSUER_ID, ASC_APP_ID, ASC_KEY_PEM)
+//  3. Field loaded from the SOPS-decrypted YAML (if SOPSPath or
+//     OWNPULSE_INFRA_PATH yields one)
+//
+// Each field is resolved independently — passing only --key-id with the rest
+// in SOPS produces a merged result rather than silently dropping the flag.
+// Returns an error naming every field that could not be filled from any
+// source.
+//
+// Note: there is no --key-pem flag (and intentionally so — PEM contents on the
+// command line leak via ps/shell history). Only env or SOPS can supply KeyPEM.
 func ResolveCredentials(explicit CredentialOptions) (*Credentials, error) {
-	// Explicit non-SOPS fields win when fully populated (used by tests).
-	if explicit.SOPSPath == "" && explicit.KeyID != "" && explicit.IssuerID != "" &&
-		explicit.AppID != "" && len(explicit.KeyPEM) > 0 {
-		return LoadCredentials(explicit)
-	}
-
-	envKey := os.Getenv("ASC_KEY_ID")
-	envIss := os.Getenv("ASC_ISSUER_ID")
-	envApp := os.Getenv("ASC_APP_ID")
-	envPEM := os.Getenv("ASC_KEY_PEM")
-	if envKey != "" && envIss != "" && envApp != "" && envPEM != "" {
-		return LoadCredentials(CredentialOptions{
-			KeyID:    envKey,
-			IssuerID: envIss,
-			AppID:    envApp,
-			KeyPEM:   []byte(envPEM),
-		})
-	}
-
+	// Attempt to load SOPS values up front so we can fall back to them on a
+	// per-field basis. If SOPS isn't asked for or fails, leave sopsCreds nil
+	// and report whatever sopsErr we got only if we end up *needing* a SOPS
+	// field that wasn't otherwise provided.
+	var (
+		sopsCreds *Credentials
+		sopsErr   error
+	)
 	sopsPath := explicit.SOPSPath
 	if sopsPath == "" {
 		sopsPath = DefaultSOPSPath()
 	}
-	if sopsPath == "" {
-		return nil, errors.New("credentials missing — set OWNPULSE_INFRA_PATH or ASC_KEY_ID/ASC_ISSUER_ID/ASC_APP_ID/ASC_KEY_PEM")
+	if sopsPath != "" {
+		sopsCreds, sopsErr = LoadCredentials(CredentialOptions{
+			SOPSPath:   sopsPath,
+			SopsRunner: explicit.SopsRunner,
+		})
 	}
-	return LoadCredentials(CredentialOptions{SOPSPath: sopsPath, SopsRunner: explicit.SopsRunner})
+
+	pick := func(flag, env string, fromSOPS func(*Credentials) string) string {
+		if flag != "" {
+			return flag
+		}
+		if v := os.Getenv(env); v != "" {
+			return v
+		}
+		if sopsCreds != nil {
+			return fromSOPS(sopsCreds)
+		}
+		return ""
+	}
+	pickBytes := func(flag []byte, env string, fromSOPS func(*Credentials) []byte) []byte {
+		if len(flag) > 0 {
+			return flag
+		}
+		if v := os.Getenv(env); v != "" {
+			return []byte(v)
+		}
+		if sopsCreds != nil {
+			return fromSOPS(sopsCreds)
+		}
+		return nil
+	}
+
+	keyID := pick(explicit.KeyID, "ASC_KEY_ID", func(c *Credentials) string { return c.KeyID })
+	issuerID := pick(explicit.IssuerID, "ASC_ISSUER_ID", func(c *Credentials) string { return c.IssuerID })
+	appID := pick(explicit.AppID, "ASC_APP_ID", func(c *Credentials) string { return c.AppID })
+	keyPEM := pickBytes(explicit.KeyPEM, "ASC_KEY_PEM", func(c *Credentials) []byte { return c.KeyPEM })
+
+	var missing []string
+	if keyID == "" {
+		missing = append(missing, "key_id (flag --key-id / env ASC_KEY_ID / SOPS)")
+	}
+	if issuerID == "" {
+		missing = append(missing, "issuer_id (flag --issuer-id / env ASC_ISSUER_ID / SOPS)")
+	}
+	if appID == "" {
+		missing = append(missing, "app_id (flag --app-id / env ASC_APP_ID / SOPS)")
+	}
+	if len(keyPEM) == 0 {
+		missing = append(missing, "key_pem (env ASC_KEY_PEM / SOPS)")
+	}
+
+	if len(missing) > 0 {
+		if sopsErr != nil {
+			return nil, fmt.Errorf("credentials missing — %s; (SOPS load also failed: %w)",
+				strings.Join(missing, ", "), sopsErr)
+		}
+		// When nothing at all was supplied, prefer the short discoverable hint.
+		// Otherwise name the specific fields that are missing.
+		if keyID == "" && issuerID == "" && appID == "" && len(keyPEM) == 0 && sopsPath == "" {
+			return nil, errors.New("credentials missing — set OWNPULSE_INFRA_PATH or ASC_KEY_ID/ASC_ISSUER_ID/ASC_APP_ID/ASC_KEY_PEM")
+		}
+		return nil, fmt.Errorf("credentials missing — %s", strings.Join(missing, ", "))
+	}
+
+	return &Credentials{
+		KeyID:    keyID,
+		IssuerID: issuerID,
+		AppID:    appID,
+		KeyPEM:   keyPEM,
+	}, nil
 }
