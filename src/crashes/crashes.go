@@ -178,11 +178,15 @@ func loadECPrivateKey(der []byte) (*ecdsa.PrivateKey, error) {
 // Credentials
 // --------------------------------------------------------------------------
 
+// sopsYAML mirrors the decrypted SOPS YAML document. Production uses
+// `asc_api_key_b64` (base64-encoded .p8 contents); `key_pem` is kept as a
+// fallback for ad-hoc / test files that store the PEM literally.
 type sopsYAML struct {
-	KeyID    string `yaml:"key_id"`
-	IssuerID string `yaml:"issuer_id"`
-	AppID    string `yaml:"app_id"`
-	KeyPEM   string `yaml:"key_pem"`
+	KeyID     string `yaml:"key_id"`
+	IssuerID  string `yaml:"issuer_id"`
+	AppID     string `yaml:"app_id"`
+	KeyPEM    string `yaml:"key_pem"`         // legacy / test path: raw PEM block
+	APIKeyB64 string `yaml:"asc_api_key_b64"` // production path: base64(.p8 contents)
 }
 
 // LoadCredentials resolves credentials from explicit fields, or by invoking
@@ -241,6 +245,21 @@ func loadFromSOPS(opts CredentialOptions) (*Credentials, error) {
 		return nil, fmt.Errorf("parsing SOPS YAML: %w", err)
 	}
 
+	// Resolve PEM bytes. Production stores the .p8 as base64 in
+	// `asc_api_key_b64`; legacy/test files use literal `key_pem`.
+	// Base64 wins when both are present.
+	var pemBytes []byte
+	switch {
+	case doc.APIKeyB64 != "":
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(doc.APIKeyB64))
+		if err != nil {
+			return nil, fmt.Errorf("decoding asc_api_key_b64 from SOPS YAML: %w", err)
+		}
+		pemBytes = decoded
+	case doc.KeyPEM != "":
+		pemBytes = []byte(doc.KeyPEM)
+	}
+
 	var missing []string
 	if doc.KeyID == "" {
 		missing = append(missing, "key_id")
@@ -251,8 +270,8 @@ func loadFromSOPS(opts CredentialOptions) (*Credentials, error) {
 	if doc.AppID == "" {
 		missing = append(missing, "app_id")
 	}
-	if doc.KeyPEM == "" {
-		missing = append(missing, "key_pem")
+	if len(pemBytes) == 0 {
+		missing = append(missing, "missing PEM: set either asc_api_key_b64 (base64) or key_pem (PEM literal) in the SOPS YAML")
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("SOPS file missing required fields: %s", strings.Join(missing, ", "))
@@ -262,7 +281,7 @@ func loadFromSOPS(opts CredentialOptions) (*Credentials, error) {
 		KeyID:    doc.KeyID,
 		IssuerID: doc.IssuerID,
 		AppID:    doc.AppID,
-		KeyPEM:   []byte(doc.KeyPEM),
+		KeyPEM:   pemBytes,
 	}, nil
 }
 

@@ -384,6 +384,64 @@ func TestLoadCredentials_SOPSPath(t *testing.T) {
 	}
 }
 
+func TestLoadCredentials_SOPS_Base64Encoded(t *testing.T) {
+	// Production path: SOPS stores the .p8 contents as base64 under
+	// asc_api_key_b64. LoadCredentials must decode it into raw PEM bytes.
+	const testPEM = "-----BEGIN PRIVATE KEY-----\nFAKE-CONTENTS\n-----END PRIVATE KEY-----\n"
+	b64 := base64.StdEncoding.EncodeToString([]byte(testPEM))
+
+	tmp := t.TempDir() + "/fake.yaml"
+	if err := writeFile(tmp, "stub"); err != nil {
+		t.Fatal(err)
+	}
+	yamlDoc := "key_id: KEYID123\n" +
+		"issuer_id: 11111111-2222-3333-4444-555555555555\n" +
+		"app_id: '1234567890'\n" +
+		"asc_api_key_b64: " + b64 + "\n"
+
+	creds, err := LoadCredentials(CredentialOptions{
+		SOPSPath:   tmp,
+		SopsRunner: func(path string) ([]byte, error) { return []byte(yamlDoc), nil },
+	})
+	if err != nil {
+		t.Fatalf("LoadCredentials: %v", err)
+	}
+	if string(creds.KeyPEM) != testPEM {
+		t.Fatalf("KeyPEM = %q, want decoded PEM %q", string(creds.KeyPEM), testPEM)
+	}
+}
+
+func TestLoadCredentials_SOPS_PrefersBase64OverPEM(t *testing.T) {
+	// When both fields are present, asc_api_key_b64 must win — it's the
+	// production schema, so any legacy key_pem residue is stale.
+	const winnerPEM = "-----BEGIN PRIVATE KEY-----\nWINNER\n-----END PRIVATE KEY-----\n"
+	const loserPEM = "-----BEGIN PRIVATE KEY-----\nLOSER\n-----END PRIVATE KEY-----\n"
+	b64 := base64.StdEncoding.EncodeToString([]byte(winnerPEM))
+
+	tmp := t.TempDir() + "/fake.yaml"
+	if err := writeFile(tmp, "stub"); err != nil {
+		t.Fatal(err)
+	}
+	// Note: key_pem is a YAML literal block so it survives intact for the
+	// comparison below.
+	yamlDoc := "key_id: K\n" +
+		"issuer_id: I\n" +
+		"app_id: A\n" +
+		"asc_api_key_b64: " + b64 + "\n" +
+		"key_pem: |\n  " + strings.ReplaceAll(loserPEM, "\n", "\n  ")
+
+	creds, err := LoadCredentials(CredentialOptions{
+		SOPSPath:   tmp,
+		SopsRunner: func(path string) ([]byte, error) { return []byte(yamlDoc), nil },
+	})
+	if err != nil {
+		t.Fatalf("LoadCredentials: %v", err)
+	}
+	if string(creds.KeyPEM) != winnerPEM {
+		t.Fatalf("KeyPEM = %q, want base64-decoded winner %q", string(creds.KeyPEM), winnerPEM)
+	}
+}
+
 func TestLoadCredentials_SOPSMissing(t *testing.T) {
 	tmp := t.TempDir() + "/fake.yaml"
 	if err := writeFile(tmp, "stub"); err != nil {
