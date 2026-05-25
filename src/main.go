@@ -1,15 +1,19 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
 	"github.com/ownpulse/ownpulse-dev/src/config"
+	"github.com/ownpulse/ownpulse-dev/src/crashes"
 	"github.com/ownpulse/ownpulse-dev/src/workspace"
 )
 
@@ -47,6 +51,7 @@ create a workspace.override.toml alongside it.`,
 		cleanCmd(),
 		e2eCmd(),
 		updateCmd(),
+		crashesCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -300,6 +305,302 @@ May require sudo if installed to a system directory like /usr/local/bin.`,
 			return workspace.Update(version, workspace.UpdateOptions{DryRun: dryRun})
 		},
 	}
+}
+
+// --- crashes ---
+
+type crashesFlags struct {
+	since    string
+	device   string
+	signal   string
+	build    string
+	jsonOut  bool
+	sopsPath string
+	appID    string
+
+	// Mostly for tests / power users. Note: no --key-pem flag — PEM contents
+	// passed on argv would leak via ps(1), shell history, and process
+	// accounting. The PEM must come from ASC_KEY_PEM or SOPS.
+	keyID    string
+	issuerID string
+	buildID  string
+}
+
+func crashesCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "crashes",
+		Short: "Diagnose iOS crashes via App Store Connect",
+		Long: `Pulls crash signatures and tester feedback from App Store Connect.
+
+The SOPS-encrypted credentials file is located in this order:
+  1. --sops-path <file>                  explicit override
+  2. $OWNPULSE_INFRA_PATH/secrets/...    legacy / non-workspace use
+  3. workspace config                    looks up ownpulse-infra repo at
+                                         <clone_root>/ownpulse-infra/secrets/
+                                         ios/appstore-connect.sops.yaml
+
+Individual fields can also be supplied directly, with this precedence:
+  1. --key-id / --issuer-id / --app-id flags (no --key-pem; argv leaks)
+  2. Env: ASC_KEY_ID, ASC_ISSUER_ID, ASC_APP_ID, ASC_KEY_PEM
+     (ASC_KEY_PEM holds the *contents* of the .p8 file, not a path)
+  3. Values from the SOPS YAML located above
+
+The decrypted PEM stays in memory only; never written to disk.`,
+	}
+
+	for _, sub := range []*cobra.Command{
+		crashesDiagnoseCmd(),
+		crashesListBuildsCmd(),
+		crashesCrashFeedbackCmd(),
+	} {
+		// Don't print cobra usage on RunE error — the error message alone is plenty.
+		sub.SilenceUsage = true
+		cmd.AddCommand(sub)
+	}
+	return cmd
+}
+
+func addCommonCrashesFlags(cmd *cobra.Command, f *crashesFlags) {
+	cmd.Flags().StringVar(&f.sopsPath, "sops-path", "", "path to SOPS-encrypted credentials YAML")
+	cmd.Flags().StringVar(&f.appID, "app-id", "", "override app id from credentials/env")
+	cmd.Flags().StringVar(&f.keyID, "key-id", "", "explicit App Store Connect key id")
+	cmd.Flags().StringVar(&f.issuerID, "issuer-id", "", "explicit App Store Connect issuer id")
+	// No --key-pem flag by design: PEM contents in argv leak via ps(1), shell
+	// history, and process accounting. Use the ASC_KEY_PEM env var or SOPS.
+}
+
+func crashesDiagnoseCmd() *cobra.Command {
+	f := &crashesFlags{}
+	cmd := &cobra.Command{
+		Use:   "diagnose",
+		Short: "End-to-end: list builds, fetch crashes, render report",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			creds, err := resolveCrashesCredentials(f)
+			if err != nil {
+				return err
+			}
+			var since *time.Time
+			if f.since != "" {
+				ts, err := crashes.ParseSince(f.since)
+				if err != nil {
+					return err
+				}
+				since = &ts
+			}
+			result, err := crashes.Diagnose(creds, crashes.DiagnoseOptions{
+				AppID:      f.appID,
+				Since:      since,
+				BuildVer:   f.build,
+				DeviceID:   f.device,
+				SignalName: f.signal,
+			})
+			if err != nil {
+				return err
+			}
+			if f.jsonOut {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(result.Diagnostics)
+			}
+			crashes.RenderTable(os.Stdout, result)
+			return nil
+		},
+	}
+	addCommonCrashesFlags(cmd, f)
+	cmd.Flags().StringVar(&f.since, "since", "7d", "duration (24h, 7d, 30d) or ISO 8601 timestamp")
+	cmd.Flags().StringVar(&f.device, "device", "", "filter by device id (Phase 1: warning only)")
+	cmd.Flags().StringVar(&f.signal, "signal", "", "client-side filter on signal name (e.g. SIGSEGV)")
+	cmd.Flags().StringVar(&f.build, "build", "", "filter to a specific build version")
+	cmd.Flags().BoolVar(&f.jsonOut, "json", false, "emit JSON instead of a human table")
+	return cmd
+}
+
+func crashesListBuildsCmd() *cobra.Command {
+	f := &crashesFlags{}
+	cmd := &cobra.Command{
+		Use:   "list-builds",
+		Short: "List builds for an app (JSON)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			creds, err := resolveCrashesCredentials(f)
+			if err != nil {
+				return err
+			}
+			token, err := crashes.MintJWT(creds)
+			if err != nil {
+				return err
+			}
+			appID := f.appID
+			if appID == "" {
+				appID = creds.AppID
+			}
+			var since *time.Time
+			if f.since != "" {
+				ts, err := crashes.ParseSince(f.since)
+				if err != nil {
+					return err
+				}
+				since = &ts
+			}
+			builds, err := crashes.ListBuilds(token, appID, since, crashes.DefaultHTTPGetter)
+			if err != nil {
+				return err
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(builds)
+		},
+	}
+	addCommonCrashesFlags(cmd, f)
+	cmd.Flags().StringVar(&f.since, "since", "", "duration (24h, 7d, 30d) or ISO 8601 timestamp")
+	return cmd
+}
+
+func crashesCrashFeedbackCmd() *cobra.Command {
+	f := &crashesFlags{}
+	cmd := &cobra.Command{
+		Use:   "crash-feedback",
+		Short: "Fetch crash feedback for a build (JSON)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if f.buildID == "" {
+				return fmt.Errorf("--build-id is required")
+			}
+			creds, err := resolveCrashesCredentials(f)
+			if err != nil {
+				return err
+			}
+			token, err := crashes.MintJWT(creds)
+			if err != nil {
+				return err
+			}
+			entries, err := crashes.CrashFeedback(token, f.buildID, crashes.DefaultHTTPGetter)
+			if err != nil {
+				return err
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(entries)
+		},
+	}
+	addCommonCrashesFlags(cmd, f)
+	cmd.Flags().StringVar(&f.buildID, "build-id", "", "App Store Connect build id (required)")
+	return cmd
+}
+
+// sopsPathLookup tracks the SOPS-path resolution for a given invocation so we
+// can emit a rich error if everything falls through.
+type sopsPathLookup struct {
+	resolved      string // final path (may be empty)
+	source        string // "flag", "env", "workspace-config", or "none"
+	configAttempt string // expected workspace path if config was consulted
+	configProblem string // why config lookup didn't yield a usable path, if any
+}
+
+// resolveSOPSPath applies the documented resolution order. It does NOT verify
+// the file exists; downstream LoadCredentials handles that. Errors from
+// loadConfig are intentionally swallowed — opdev should still work when run
+// outside a workspace.
+func resolveSOPSPath(flagPath string) sopsPathLookup {
+	if flagPath != "" {
+		return sopsPathLookup{resolved: flagPath, source: "flag"}
+	}
+	if env := os.Getenv("OWNPULSE_INFRA_PATH"); env != "" {
+		return sopsPathLookup{
+			resolved: filepath.Join(env, crashes.SOPSRelPath),
+			source:   "env",
+		}
+	}
+
+	out := sopsPathLookup{source: "none"}
+	cfg, err := loadConfig()
+	if err != nil {
+		out.configProblem = fmt.Sprintf("workspace config not loadable (%v)", err)
+		return out
+	}
+
+	const infraRepo = "ownpulse-infra"
+	var repo *config.RepoConfig
+	for i := range cfg.Repos {
+		if cfg.Repos[i].Name == infraRepo {
+			repo = &cfg.Repos[i]
+			break
+		}
+	}
+	if repo == nil {
+		out.configProblem = fmt.Sprintf("repo %q not registered in workspace", infraRepo)
+		return out
+	}
+
+	candidate := filepath.Join(cfg.Workspace.CloneRoot, repo.Name, crashes.SOPSRelPath)
+	out.configAttempt = candidate
+	if _, err := os.Stat(candidate); err != nil {
+		out.configProblem = fmt.Sprintf("expected file not present at %s (%v)", candidate, err)
+		return out
+	}
+	out.resolved = candidate
+	out.source = "workspace-config"
+	return out
+}
+
+func resolveCrashesCredentials(f *crashesFlags) (*crashes.Credentials, error) {
+	lookup := resolveSOPSPath(f.sopsPath)
+	creds, err := crashes.ResolveCredentials(crashes.CredentialOptions{
+		KeyID:    f.keyID,
+		IssuerID: f.issuerID,
+		AppID:    f.appID,
+		SOPSPath: lookup.resolved,
+	})
+	if err != nil {
+		var miss *crashes.MissingCredentialsError
+		if errors.As(err, &miss) {
+			return nil, missingCredsMessage(lookup, miss)
+		}
+		return nil, err
+	}
+	return creds, nil
+}
+
+// missingCredsMessage builds the multi-paragraph error users see when no
+// resolution path produced credentials. The intent is to help them figure out
+// which knob to turn next.
+func missingCredsMessage(lookup sopsPathLookup, miss *crashes.MissingCredentialsError) error {
+	// Describe each source the way the user would think about it.
+	flagLine := "1. --sops-path flag (not set)"
+	if lookup.source == "flag" {
+		flagLine = fmt.Sprintf("1. --sops-path %s (used; load failed or fields missing)", lookup.resolved)
+	}
+
+	envVal := os.Getenv("OWNPULSE_INFRA_PATH")
+	envLine := "2. OWNPULSE_INFRA_PATH env (not set)"
+	if envVal != "" {
+		envLine = fmt.Sprintf("2. OWNPULSE_INFRA_PATH=%s (used; load failed or fields missing)", envVal)
+	}
+
+	var configLine string
+	switch {
+	case lookup.source == "workspace-config":
+		configLine = fmt.Sprintf("3. workspace config: %s (used; load failed or fields missing)", lookup.resolved)
+	case lookup.configProblem != "":
+		configLine = fmt.Sprintf("3. workspace config: %s", lookup.configProblem)
+	default:
+		configLine = "3. workspace config: not consulted"
+	}
+
+	ascLine := "4. ASC_KEY_ID/ASC_ISSUER_ID/ASC_APP_ID/ASC_KEY_PEM env vars (not all set)"
+
+	body := strings.Join([]string{
+		"credentials missing. Tried:",
+		"  " + flagLine,
+		"  " + envLine,
+		"  " + configLine,
+		"  " + ascLine,
+		"",
+		"Run `opdev list` to see registered repos. Run `opdev setup` to clone missing ones.",
+	}, "\n")
+
+	if len(miss.Fields) > 0 {
+		body += "\n\nMissing fields: " + strings.Join(miss.Fields, ", ")
+	}
+	return errors.New(body)
 }
 
 func resolveAgentsPath(cfg *config.WorkspaceConfig) (string, error) {
