@@ -1,15 +1,18 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
 	"github.com/ownpulse/ownpulse-dev/src/config"
+	"github.com/ownpulse/ownpulse-dev/src/crashes"
 	"github.com/ownpulse/ownpulse-dev/src/workspace"
 )
 
@@ -47,6 +50,7 @@ create a workspace.override.toml alongside it.`,
 		cleanCmd(),
 		e2eCmd(),
 		updateCmd(),
+		crashesCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -300,6 +304,186 @@ May require sudo if installed to a system directory like /usr/local/bin.`,
 			return workspace.Update(version, workspace.UpdateOptions{DryRun: dryRun})
 		},
 	}
+}
+
+// --- crashes ---
+
+type crashesFlags struct {
+	since    string
+	device   string
+	signal   string
+	build    string
+	jsonOut  bool
+	sopsPath string
+	appID    string
+
+	// Mostly for tests / power users.
+	keyID    string
+	issuerID string
+	keyPEM   string
+	buildID  string
+}
+
+func crashesCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "crashes",
+		Short: "Diagnose iOS crashes via App Store Connect",
+		Long: `Pulls crash signatures and tester feedback from App Store Connect.
+
+Credentials are resolved in this order:
+  1. Explicit --key-id/--issuer-id/--app-id/--key-pem flags
+  2. Env: ASC_KEY_ID, ASC_ISSUER_ID, ASC_APP_ID, ASC_KEY_PEM
+     (ASC_KEY_PEM holds the *contents* of the .p8 file, not a path)
+  3. --sops-path <file>, or $OWNPULSE_INFRA_PATH/secrets/ios/appstore-connect.sops.yaml
+
+The decrypted PEM stays in memory only; never written to disk.`,
+	}
+
+	for _, sub := range []*cobra.Command{
+		crashesDiagnoseCmd(),
+		crashesListBuildsCmd(),
+		crashesCrashFeedbackCmd(),
+	} {
+		// Don't print cobra usage on RunE error — the error message alone is plenty.
+		sub.SilenceUsage = true
+		cmd.AddCommand(sub)
+	}
+	return cmd
+}
+
+func addCommonCrashesFlags(cmd *cobra.Command, f *crashesFlags) {
+	cmd.Flags().StringVar(&f.sopsPath, "sops-path", "", "path to SOPS-encrypted credentials YAML")
+	cmd.Flags().StringVar(&f.appID, "app-id", "", "override app id from credentials/env")
+	cmd.Flags().StringVar(&f.keyID, "key-id", "", "explicit App Store Connect key id")
+	cmd.Flags().StringVar(&f.issuerID, "issuer-id", "", "explicit App Store Connect issuer id")
+	cmd.Flags().StringVar(&f.keyPEM, "key-pem", "", "explicit App Store Connect private key PEM contents")
+}
+
+func crashesDiagnoseCmd() *cobra.Command {
+	f := &crashesFlags{}
+	cmd := &cobra.Command{
+		Use:   "diagnose",
+		Short: "End-to-end: list builds, fetch crashes, render report",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			creds, err := resolveCrashesCredentials(f)
+			if err != nil {
+				return err
+			}
+			var since *time.Time
+			if f.since != "" {
+				ts, err := crashes.ParseSince(f.since)
+				if err != nil {
+					return err
+				}
+				since = &ts
+			}
+			result, err := crashes.Diagnose(creds, crashes.DiagnoseOptions{
+				AppID:      f.appID,
+				Since:      since,
+				BuildVer:   f.build,
+				DeviceID:   f.device,
+				SignalName: f.signal,
+			})
+			if err != nil {
+				return err
+			}
+			if f.jsonOut {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(result.Diagnostics)
+			}
+			crashes.RenderTable(os.Stdout, result)
+			return nil
+		},
+	}
+	addCommonCrashesFlags(cmd, f)
+	cmd.Flags().StringVar(&f.since, "since", "7d", "duration (24h, 7d, 30d) or ISO 8601 timestamp")
+	cmd.Flags().StringVar(&f.device, "device", "", "filter by device id (Phase 1: warning only)")
+	cmd.Flags().StringVar(&f.signal, "signal", "", "client-side filter on signal name (e.g. SIGSEGV)")
+	cmd.Flags().StringVar(&f.build, "build", "", "filter to a specific build version")
+	cmd.Flags().BoolVar(&f.jsonOut, "json", false, "emit JSON instead of a human table")
+	return cmd
+}
+
+func crashesListBuildsCmd() *cobra.Command {
+	f := &crashesFlags{}
+	cmd := &cobra.Command{
+		Use:   "list-builds",
+		Short: "List builds for an app (JSON)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			creds, err := resolveCrashesCredentials(f)
+			if err != nil {
+				return err
+			}
+			token, err := crashes.MintJWT(creds)
+			if err != nil {
+				return err
+			}
+			appID := f.appID
+			if appID == "" {
+				appID = creds.AppID
+			}
+			var since *time.Time
+			if f.since != "" {
+				ts, err := crashes.ParseSince(f.since)
+				if err != nil {
+					return err
+				}
+				since = &ts
+			}
+			builds, err := crashes.ListBuilds(token, appID, since, crashes.DefaultHTTPGetter)
+			if err != nil {
+				return err
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(builds)
+		},
+	}
+	addCommonCrashesFlags(cmd, f)
+	cmd.Flags().StringVar(&f.since, "since", "", "duration (24h, 7d, 30d) or ISO 8601 timestamp")
+	return cmd
+}
+
+func crashesCrashFeedbackCmd() *cobra.Command {
+	f := &crashesFlags{}
+	cmd := &cobra.Command{
+		Use:   "crash-feedback",
+		Short: "Fetch crash feedback for a build (JSON)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if f.buildID == "" {
+				return fmt.Errorf("--build-id is required")
+			}
+			creds, err := resolveCrashesCredentials(f)
+			if err != nil {
+				return err
+			}
+			token, err := crashes.MintJWT(creds)
+			if err != nil {
+				return err
+			}
+			entries, err := crashes.CrashFeedback(token, f.buildID, crashes.DefaultHTTPGetter)
+			if err != nil {
+				return err
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(entries)
+		},
+	}
+	addCommonCrashesFlags(cmd, f)
+	cmd.Flags().StringVar(&f.buildID, "build-id", "", "App Store Connect build id (required)")
+	return cmd
+}
+
+func resolveCrashesCredentials(f *crashesFlags) (*crashes.Credentials, error) {
+	return crashes.ResolveCredentials(crashes.CredentialOptions{
+		KeyID:    f.keyID,
+		IssuerID: f.issuerID,
+		AppID:    f.appID,
+		KeyPEM:   []byte(f.keyPEM),
+		SOPSPath: f.sopsPath,
+	})
 }
 
 func resolveAgentsPath(cfg *config.WorkspaceConfig) (string, error) {
