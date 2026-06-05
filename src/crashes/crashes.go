@@ -389,12 +389,19 @@ func assertASCHost(rawURL string) error {
 }
 
 func ascGet(token, rawURL string, httpGet HTTPGetter) (map[string]interface{}, error) {
+	return ascGetAccept(token, rawURL, "application/json", httpGet)
+}
+
+// ascGetAccept is ascGet with a caller-supplied Accept header. The
+// perfPowerMetrics endpoint rejects "application/json" with a 406 and requires
+// "application/vnd.apple.xcode-metrics+json"; everything else uses JSON.
+func ascGetAccept(token, rawURL, accept string, httpGet HTTPGetter) (map[string]interface{}, error) {
 	if err := assertASCHost(rawURL); err != nil {
 		return nil, err
 	}
 	body, err := httpGet(rawURL, map[string]string{
 		"Authorization": "Bearer " + token,
-		"Accept":        "application/json",
+		"Accept":        accept,
 	})
 	if err != nil {
 		return nil, err
@@ -587,7 +594,7 @@ func CrashFeedback(token, buildID string, httpGet HTTPGetter) ([]Diagnostic, err
 	var results []Diagnostic
 
 	metricsURL := fmt.Sprintf("%s/v1/builds/%s/perfPowerMetrics", ascBaseURL, url.PathEscape(buildID))
-	metrics, err := ascGet(token, metricsURL, httpGet)
+	metrics, err := ascGetAccept(token, metricsURL, "application/vnd.apple.xcode-metrics+json", httpGet)
 	if err != nil {
 		var ascErr *ASCError
 		if errors.As(err, &ascErr) && ascErr.Status == 404 {
